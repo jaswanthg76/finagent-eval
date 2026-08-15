@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import './App.css'
 
 type Company = {
@@ -70,6 +70,22 @@ type EmbeddingProgress = {
   model: string | null
 }
 
+type SemanticSearchResult = {
+  chunk_id: number
+  filing_id: number
+  accession_number: string
+  form: string
+  filing_date: string
+  report_date: string | null
+  section_name: string
+  chunk_index: number
+  content: string
+  token_count: number
+  similarity: number
+  source_url: string
+  embedded_at: string
+}
+
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
 async function responseError(response: Response): Promise<string> {
@@ -96,6 +112,13 @@ function App() {
   const [ingestingFilingId, setIngestingFilingId] = useState<number | null>(null)
   const [bulkProgress, setBulkProgress] = useState<BulkIngestProgress | null>(null)
   const [embeddingProgress, setEmbeddingProgress] = useState<EmbeddingProgress | null>(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchForm, setSearchForm] = useState('')
+  const [searchAsOfDate, setSearchAsOfDate] = useState('')
+  const [searchResults, setSearchResults] = useState<SemanticSearchResult[]>([])
+  const [searchError, setSearchError] = useState<string | null>(null)
+  const [isSearching, setIsSearching] = useState(false)
+  const [hasSearched, setHasSearched] = useState(false)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -130,6 +153,9 @@ function App() {
     setIsFilingsLoading(true)
     setFilingsError(null)
     setSyncMessage(null)
+    setSearchResults([])
+    setSearchError(null)
+    setHasSearched(false)
 
     async function loadFilings() {
       try {
@@ -342,6 +368,37 @@ function App() {
     }
   }
 
+  async function searchEvidence(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!selectedCompany) return
+
+    const query = searchQuery.trim()
+    if (query.length < 2) {
+      setSearchError('Enter at least two characters to search filing evidence.')
+      return
+    }
+
+    setIsSearching(true)
+    setSearchError(null)
+    setHasSearched(true)
+    try {
+      const params = new URLSearchParams({ query, limit: '8' })
+      if (searchForm) params.set('form', searchForm)
+      if (searchAsOfDate) params.set('as_of_date', searchAsOfDate)
+
+      const response = await fetch(
+        `${API_URL}/api/companies/${selectedCompany.ticker}/search?${params.toString()}`,
+      )
+      if (!response.ok) throw new Error(await responseError(response))
+      setSearchResults((await response.json()) as SemanticSearchResult[])
+    } catch (requestError) {
+      setSearchResults([])
+      if (requestError instanceof Error) setSearchError(requestError.message)
+    } finally {
+      setIsSearching(false)
+    }
+  }
+
   return (
     <main>
       <header className="site-header">
@@ -393,6 +450,7 @@ function App() {
                   isSyncing ||
                   isReingestingAll ||
                   isEmbeddingSyncing ||
+                  isSearching ||
                   ingestingFilingId !== null
                 }
               >
@@ -407,6 +465,122 @@ function App() {
           </div>
         )}
       </section>
+
+      {selectedCompany && (
+        <section className="search-section" aria-labelledby="search-heading">
+          <div className="search-heading">
+            <div>
+              <p className="eyebrow">Semantic retrieval</p>
+              <h2 id="search-heading">Search {selectedCompany.ticker} evidence</h2>
+              <p className="section-description">
+                Find relevant passages across embedded SEC filings. Results are evidence, not an
+                AI-generated answer.
+              </p>
+            </div>
+            {hasSearched && !isSearching && !searchError && (
+              <span className="count">{searchResults.length} results</span>
+            )}
+          </div>
+
+          <form className="search-form" onSubmit={searchEvidence}>
+            <label className="query-field">
+              <span>Research question</span>
+              <input
+                type="search"
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="What drove Data Center revenue growth?"
+                minLength={2}
+                maxLength={2000}
+                required
+              />
+            </label>
+            <label>
+              <span>Filing type</span>
+              <select value={searchForm} onChange={(event) => setSearchForm(event.target.value)}>
+                <option value="">All forms</option>
+                <option value="10-K">10-K</option>
+                <option value="10-Q">10-Q</option>
+                <option value="8-K">8-K</option>
+              </select>
+            </label>
+            <label>
+              <span>Filed on or before</span>
+              <input
+                type="date"
+                value={searchAsOfDate}
+                onChange={(event) => setSearchAsOfDate(event.target.value)}
+              />
+            </label>
+            <button
+              className="sync-button search-submit"
+              type="submit"
+              disabled={
+                isSearching ||
+                isEmbeddingSyncing ||
+                isReingestingAll ||
+                bulkProgress !== null ||
+                ingestingFilingId !== null
+              }
+            >
+              {isSearching ? 'Searching…' : 'Search evidence'}
+            </button>
+          </form>
+
+          {searchError && <div className="error search-feedback" role="alert">{searchError}</div>}
+          {isSearching && <p className="message search-feedback">Ranking filing passages…</p>}
+          {hasSearched && !isSearching && !searchError && searchResults.length === 0 && (
+            <div className="empty-state search-feedback">
+              <strong>No matching evidence found.</strong>
+              <span>Try a broader question or remove a filing filter.</span>
+            </div>
+          )}
+          {!isSearching && searchResults.length > 0 && (
+            <div className="evidence-results" aria-live="polite">
+              {searchResults.map((result, index) => {
+                const excerpt = result.content.slice(0, 700)
+                const hasMore = result.content.length > excerpt.length
+                return (
+                  <article className="evidence-card" key={result.chunk_id}>
+                    <div className="evidence-rank" aria-label={`Result ${index + 1}`}>
+                      {String(index + 1).padStart(2, '0')}
+                    </div>
+                    <div className="evidence-body">
+                      <div className="evidence-header">
+                        <div>
+                          <span className="form-badge">{result.form}</span>
+                          <strong>{result.section_name}</strong>
+                        </div>
+                        <span className="similarity-score">
+                          {Math.round(result.similarity * 100)}% match
+                        </span>
+                      </div>
+                      <p className="evidence-content">
+                        {excerpt}{hasMore ? '…' : ''}
+                      </p>
+                      {hasMore && (
+                        <details className="evidence-details">
+                          <summary>View full chunk</summary>
+                          <p>{result.content}</p>
+                        </details>
+                      )}
+                      <div className="evidence-footer">
+                        <span>Filed {result.filing_date}</span>
+                        <span>Report {result.report_date ?? '—'}</span>
+                        <span>{result.token_count} tokens</span>
+                        <span className="evidence-accession">{result.accession_number}</span>
+                        <a href={result.source_url} target="_blank" rel="noreferrer">
+                          Open SEC filing <span aria-hidden="true">↗</span>
+                        </a>
+                      </div>
+                    </div>
+                  </article>
+                )
+              })}
+            </div>
+          )}
+        </section>
+      )}
 
       {selectedCompany && (
         <section className="filings-section" aria-labelledby="filings-heading">
@@ -426,6 +600,7 @@ function App() {
                   isSyncing ||
                   isReingestingAll ||
                   isEmbeddingSyncing ||
+                  isSearching ||
                   ingestingFilingId !== null ||
                   filings.length === 0
                 }
@@ -443,6 +618,7 @@ function App() {
                   bulkProgress !== null ||
                   isSyncing ||
                   isEmbeddingSyncing ||
+                  isSearching ||
                   ingestingFilingId !== null
                 }
                 title="Regenerate sections and chunks for every stored filing"
@@ -458,6 +634,7 @@ function App() {
                   isSyncing ||
                   isReingestingAll ||
                   bulkProgress !== null ||
+                  isSearching ||
                   ingestingFilingId !== null ||
                   isFilingsLoading ||
                   !filings.some((filing) => filing.ingested_at !== null)
@@ -474,6 +651,7 @@ function App() {
                   isSyncing ||
                   isReingestingAll ||
                   isEmbeddingSyncing ||
+                  isSearching ||
                   bulkProgress !== null ||
                   ingestingFilingId !== null
                 }
@@ -549,7 +727,8 @@ function App() {
                         bulkProgress !== null ||
                         isSyncing ||
                         isReingestingAll ||
-                        isEmbeddingSyncing
+                        isEmbeddingSyncing ||
+                        isSearching
                       }
                     >
                       {ingestingFilingId === filing.id
