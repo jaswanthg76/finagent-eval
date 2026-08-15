@@ -9,6 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.retrieval import _semantic_search_for_company
 from app.core.config import settings
 from app.core.database import get_db
+from app.evaluation.citations import (
+    CITATION_VERIFIER_VERSION,
+    CitationClaimInput,
+    CitationEvaluationConfigurationError,
+    CitationEvaluationError,
+    GroqCitationEvaluator,
+)
 from app.evaluation.numeric import (
     NUMERIC_VERIFIER_VERSION,
     is_numeric_claim,
@@ -33,6 +40,7 @@ from app.research.claims import (
 )
 from app.research.hybrid import identify_metric_names
 from app.schemas.research import (
+    CitationVerificationResult,
     ClaimEvaluationRead,
     ClaimExtractionResult,
     NumericVerificationResult,
@@ -83,10 +91,11 @@ def _evaluation_read(evaluation: ClaimEvaluation) -> ClaimEvaluationRead:
     return ClaimEvaluationRead(
         id=evaluation.id,
         claim_id=evaluation.claim_id,
-        evaluation_type="NUMERIC",
+        evaluation_type=evaluation.evaluation_type,
         status=evaluation.status,
         confidence=float(evaluation.confidence),
         reason=evaluation.reason,
+        evidence_ids=evaluation.evidence_ids,
         claimed_values=evaluation.claimed_values,
         calculated_values=evaluation.calculated_values,
         verifier_version=evaluation.verifier_version,
@@ -520,7 +529,7 @@ async def list_claim_evaluations(
         select(ClaimEvaluation)
         .join(ResearchClaim, ResearchClaim.id == ClaimEvaluation.claim_id)
         .where(ResearchClaim.report_id == report_id)
-        .order_by(ResearchClaim.claim_index)
+        .order_by(ResearchClaim.claim_index, ClaimEvaluation.evaluation_type)
     )
     return [_evaluation_read(evaluation) for evaluation in result.scalars().all()]
 
@@ -556,7 +565,10 @@ async def verify_report_numeric_claims(
 
     eligible_ids = [claim.id for claim in eligible]
     existing_result = await db.execute(
-        select(ClaimEvaluation).where(ClaimEvaluation.claim_id.in_(eligible_ids))
+        select(ClaimEvaluation).where(
+            ClaimEvaluation.claim_id.in_(eligible_ids),
+            ClaimEvaluation.evaluation_type == "NUMERIC",
+        )
     )
     existing = list(existing_result.scalars().all())
     if len(existing) == len(eligible) and not force:
@@ -572,7 +584,12 @@ async def verify_report_numeric_claims(
         f"M{index}": metric for index, metric in enumerate(report.metrics, start=1)
     }
     if existing:
-        await db.execute(delete(ClaimEvaluation).where(ClaimEvaluation.claim_id.in_(eligible_ids)))
+        await db.execute(
+            delete(ClaimEvaluation).where(
+                ClaimEvaluation.claim_id.in_(eligible_ids),
+                ClaimEvaluation.evaluation_type == "NUMERIC",
+            )
+        )
     evaluations: list[ClaimEvaluation] = []
     for claim in eligible:
         outcome = verify_numeric_claim(
@@ -587,6 +604,9 @@ async def verify_report_numeric_claims(
                 status=outcome.status,
                 confidence=outcome.confidence,
                 reason=outcome.reason,
+                evidence_ids=[
+                    evidence_id for evidence_id in claim.citation_ids if evidence_id.startswith("M")
+                ],
                 claimed_values=outcome.claimed_values,
                 calculated_values=outcome.calculated_values,
                 verifier_version=NUMERIC_VERIFIER_VERSION,
@@ -597,6 +617,132 @@ async def verify_report_numeric_claims(
     for evaluation in evaluations:
         await db.refresh(evaluation)
     return NumericVerificationResult(
+        report_id=report_id,
+        eligible_claims=len(eligible),
+        verified_claims=sum(item.status == "VERIFIED" for item in evaluations),
+        evaluations=[_evaluation_read(item) for item in evaluations],
+    )
+
+
+@router.post(
+    "/reports/{report_id}/verify-citations",
+    response_model=CitationVerificationResult,
+)
+async def verify_report_citations(
+    report_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    force: bool = False,
+) -> CitationVerificationResult:
+    report = await db.scalar(select(ResearchReport).where(ResearchReport.id == report_id))
+    if report is None:
+        raise HTTPException(status_code=404, detail=f"Research report {report_id} was not found")
+    claims_result = await db.execute(
+        select(ResearchClaim)
+        .where(ResearchClaim.report_id == report_id)
+        .order_by(ResearchClaim.claim_index)
+    )
+    claims = list(claims_result.scalars().all())
+    eligible = [claim for claim in claims if claim.claim_type != "NUMERIC"]
+    if not eligible:
+        return CitationVerificationResult(
+            report_id=report_id,
+            eligible_claims=0,
+            verified_claims=0,
+            evaluations=[],
+        )
+
+    eligible_ids = [claim.id for claim in eligible]
+    existing_result = await db.execute(
+        select(ClaimEvaluation).where(
+            ClaimEvaluation.claim_id.in_(eligible_ids),
+            ClaimEvaluation.evaluation_type == "CITATION",
+        )
+    )
+    existing = list(existing_result.scalars().all())
+    if len(existing) == len(eligible) and not force:
+        ordered = sorted(existing, key=lambda evaluation: eligible_ids.index(evaluation.claim_id))
+        return CitationVerificationResult(
+            report_id=report_id,
+            eligible_claims=len(eligible),
+            verified_claims=sum(item.status == "VERIFIED" for item in ordered),
+            evaluations=[_evaluation_read(item) for item in ordered],
+        )
+
+    chunks_by_evidence_id = {
+        f"F{index}": chunk for index, chunk in enumerate(report.chunks, start=1)
+    }
+    model_inputs: list[CitationClaimInput] = []
+    for claim in eligible:
+        filing_ids = [
+            evidence_id
+            for evidence_id in claim.citation_ids
+            if evidence_id.startswith("F") and evidence_id in chunks_by_evidence_id
+        ]
+        if filing_ids:
+            model_inputs.append(
+                CitationClaimInput(
+                    claim_id=claim.id,
+                    claim_text=claim.claim_text,
+                    evidence_ids=filing_ids,
+                )
+            )
+
+    model_results = []
+    if model_inputs:
+        cited_ids = {
+            evidence_id for claim in model_inputs for evidence_id in claim.evidence_ids
+        }
+        try:
+            model_results = await GroqCitationEvaluator().evaluate(
+                claims=model_inputs,
+                evidence_by_id={
+                    evidence_id: chunks_by_evidence_id[evidence_id]
+                    for evidence_id in cited_ids
+                },
+            )
+        except CitationEvaluationConfigurationError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        except CitationEvaluationError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+    result_by_claim_id = {result.claim_id: result for result in model_results}
+
+    if existing:
+        await db.execute(
+            delete(ClaimEvaluation).where(
+                ClaimEvaluation.claim_id.in_(eligible_ids),
+                ClaimEvaluation.evaluation_type == "CITATION",
+            )
+        )
+    evaluations: list[ClaimEvaluation] = []
+    for claim in eligible:
+        filing_ids = [
+            evidence_id
+            for evidence_id in claim.citation_ids
+            if evidence_id.startswith("F") and evidence_id in chunks_by_evidence_id
+        ]
+        result = result_by_claim_id.get(claim.id)
+        evaluations.append(
+            ClaimEvaluation(
+                claim_id=claim.id,
+                evaluation_type="CITATION",
+                status=result.status if result else "UNSUPPORTED",
+                confidence=result.confidence if result else 1.0,
+                reason=(
+                    result.reason
+                    if result
+                    else "The qualitative claim does not cite any stored filing passage."
+                ),
+                evidence_ids=filing_ids,
+                claimed_values=[],
+                calculated_values=[],
+                verifier_version=CITATION_VERIFIER_VERSION,
+            )
+        )
+    db.add_all(evaluations)
+    await db.commit()
+    for evaluation in evaluations:
+        await db.refresh(evaluation)
+    return CitationVerificationResult(
         report_id=report_id,
         eligible_claims=len(eligible),
         verified_claims=sum(item.status == "VERIFIED" for item in evaluations),

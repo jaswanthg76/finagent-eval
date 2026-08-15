@@ -289,23 +289,30 @@ h1 {
   margin-bottom: 11px;
 }
 
-.claim-results-heading > div {
+.claim-results-copy {
   display: grid;
   gap: 4px;
 }
 
-.claim-results-heading > div > strong {
+.claim-results-copy > strong {
   color: var(--ink);
   font-size: 12px;
 }
 
-.claim-results-heading > div > span {
+.claim-results-copy > span {
   color: var(--muted-light);
   font-size: 10px;
 }
 
 .claim-results-heading button {
   width: auto;
+}
+
+.claim-results-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .numeric-verification-message {
@@ -1154,6 +1161,10 @@ h2 {
   }
 
   .claim-results-heading button {
+    width: 100%;
+  }
+
+  .claim-results-actions {
     width: 100%;
   }
 

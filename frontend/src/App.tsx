@@ -171,10 +171,11 @@ type ClaimExtractionResult = {
 type ClaimEvaluation = {
   id: number
   claim_id: number
-  evaluation_type: 'NUMERIC'
+  evaluation_type: 'NUMERIC' | 'CITATION'
   status: 'VERIFIED' | 'PARTIALLY_SUPPORTED' | 'UNSUPPORTED' | 'CONTRADICTED' | 'ERROR'
   confidence: number
   reason: string
+  evidence_ids: string[]
   claimed_values: Array<Record<string, unknown>>
   calculated_values: Array<Record<string, unknown>>
   verifier_version: string
@@ -187,6 +188,8 @@ type NumericVerificationResult = {
   verified_claims: number
   evaluations: ClaimEvaluation[]
 }
+
+type CitationVerificationResult = NumericVerificationResult
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
@@ -260,6 +263,8 @@ function App() {
   const [claimEvaluations, setClaimEvaluations] = useState<ClaimEvaluation[]>([])
   const [isVerifyingNumeric, setIsVerifyingNumeric] = useState(false)
   const [numericVerificationMessage, setNumericVerificationMessage] = useState<string | null>(null)
+  const [isVerifyingCitations, setIsVerifyingCitations] = useState(false)
+  const [citationVerificationMessage, setCitationVerificationMessage] = useState<string | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -305,6 +310,7 @@ function App() {
     setClaimsError(null)
     setClaimEvaluations([])
     setNumericVerificationMessage(null)
+    setCitationVerificationMessage(null)
     setSavedReports([])
     setReportsError(null)
     setIsReportsLoading(true)
@@ -553,6 +559,7 @@ function App() {
     setClaimsError(null)
     setClaimEvaluations([])
     setNumericVerificationMessage(null)
+    setCitationVerificationMessage(null)
     setSearchError(null)
     setHasSearched(true)
     try {
@@ -595,6 +602,7 @@ function App() {
     setClaimsError(null)
     setClaimEvaluations([])
     setNumericVerificationMessage(null)
+    setCitationVerificationMessage(null)
     try {
       const response = await fetch(`${API_URL}/api/research`, {
         method: 'POST',
@@ -655,6 +663,7 @@ function App() {
       setResearchClaims((await claimsResponse.json()) as ResearchClaim[])
       setClaimEvaluations((await evaluationsResponse.json()) as ClaimEvaluation[])
       setNumericVerificationMessage(null)
+      setCitationVerificationMessage(null)
       setSearchQuery(result.question)
       setSearchForm(result.form ?? '')
       setSearchAsOfDate(result.as_of_date ?? '')
@@ -684,6 +693,7 @@ function App() {
       setResearchClaims(result.claims)
       setClaimEvaluations([])
       setNumericVerificationMessage(null)
+      setCitationVerificationMessage(null)
     } catch (requestError) {
       if (requestError instanceof Error) setClaimsError(requestError.message)
     } finally {
@@ -704,7 +714,10 @@ function App() {
       )
       if (!response.ok) throw new Error(await responseError(response))
       const result = (await response.json()) as NumericVerificationResult
-      setClaimEvaluations(result.evaluations)
+      setClaimEvaluations((current) => [
+        ...current.filter((evaluation) => evaluation.evaluation_type !== 'NUMERIC'),
+        ...result.evaluations,
+      ])
       setNumericVerificationMessage(
         result.eligible_claims === 0
           ? 'No explicit numeric or comparative claims were available to verify.'
@@ -714,6 +727,35 @@ function App() {
       if (requestError instanceof Error) setClaimsError(requestError.message)
     } finally {
       setIsVerifyingNumeric(false)
+    }
+  }
+
+  async function verifyCitationClaims() {
+    if (!researchAnswer) return
+
+    setIsVerifyingCitations(true)
+    setClaimsError(null)
+    setCitationVerificationMessage(null)
+    try {
+      const response = await fetch(
+        `${API_URL}/api/research/reports/${researchAnswer.id}/verify-citations`,
+        { method: 'POST' },
+      )
+      if (!response.ok) throw new Error(await responseError(response))
+      const result = (await response.json()) as CitationVerificationResult
+      setClaimEvaluations((current) => [
+        ...current.filter((evaluation) => evaluation.evaluation_type !== 'CITATION'),
+        ...result.evaluations,
+      ])
+      setCitationVerificationMessage(
+        result.eligible_claims === 0
+          ? 'No qualitative claims were available for citation verification.'
+          : `${result.verified_claims} of ${result.eligible_claims} qualitative claims verified.`,
+      )
+    } catch (requestError) {
+      if (requestError instanceof Error) setClaimsError(requestError.message)
+    } finally {
+      setIsVerifyingCitations(false)
     }
   }
 
@@ -933,29 +975,64 @@ function App() {
               {researchClaims.length > 0 && (
                 <section className="claim-results" aria-labelledby="claim-results-heading">
                   <div className="claim-results-heading">
-                    <div>
+                    <div className="claim-results-copy">
                       <strong id="claim-results-heading">Atomic claims</strong>
-                      <span>Deterministic checks use cited metric facts only</span>
+                      <span>Numbers are recalculated; filing citations are checked independently</span>
                     </div>
-                    <button
-                      className="secondary-button"
-                      type="button"
-                      onClick={verifyNumericClaims}
-                      disabled={isVerifyingNumeric || claimEvaluations.length > 0}
-                    >
-                      {isVerifyingNumeric
-                        ? 'Verifying numbers…'
-                        : claimEvaluations.length > 0
-                          ? `${claimEvaluations.length} numeric checks`
-                          : 'Verify numeric claims'}
-                    </button>
+                    <div className="claim-results-actions">
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        onClick={verifyNumericClaims}
+                        disabled={
+                          isVerifyingNumeric
+                          || claimEvaluations.some(
+                            (evaluation) => evaluation.evaluation_type === 'NUMERIC',
+                          )
+                        }
+                      >
+                        {isVerifyingNumeric
+                          ? 'Verifying numbers…'
+                          : claimEvaluations.some(
+                                (evaluation) => evaluation.evaluation_type === 'NUMERIC',
+                              )
+                            ? `${claimEvaluations.filter(
+                                (evaluation) => evaluation.evaluation_type === 'NUMERIC',
+                              ).length} numeric checks`
+                            : 'Verify numeric claims'}
+                      </button>
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        onClick={verifyCitationClaims}
+                        disabled={
+                          isVerifyingCitations
+                          || claimEvaluations.some(
+                            (evaluation) => evaluation.evaluation_type === 'CITATION',
+                          )
+                        }
+                      >
+                        {isVerifyingCitations
+                          ? 'Checking citations…'
+                          : claimEvaluations.some(
+                                (evaluation) => evaluation.evaluation_type === 'CITATION',
+                              )
+                            ? `${claimEvaluations.filter(
+                                (evaluation) => evaluation.evaluation_type === 'CITATION',
+                              ).length} citation checks`
+                            : 'Verify filing citations'}
+                      </button>
+                    </div>
                   </div>
                   {numericVerificationMessage && (
                     <p className="numeric-verification-message">{numericVerificationMessage}</p>
                   )}
+                  {citationVerificationMessage && (
+                    <p className="numeric-verification-message">{citationVerificationMessage}</p>
+                  )}
                   <div className="claim-list">
                     {researchClaims.map((claim) => {
-                      const evaluation = claimEvaluations.find(
+                      const evaluations = claimEvaluations.filter(
                         (item) => item.claim_id === claim.id,
                       )
                       return (
@@ -975,14 +1052,15 @@ function App() {
                                   ))
                                 : <span>Uncited</span>}
                             </div>
-                            {evaluation && (
-                              <div className="claim-evaluation">
+                            {evaluations.map((evaluation) => (
+                              <div className="claim-evaluation" key={evaluation.id}>
                                 <span className={`evaluation-status ${evaluation.status.toLowerCase()}`}>
+                                  {evaluation.evaluation_type === 'NUMERIC' ? 'Numeric' : 'Citation'} ·{' '}
                                   {evaluation.status.replaceAll('_', ' ')}
                                 </span>
                                 <p>{evaluation.reason}</p>
                               </div>
-                            )}
+                            ))}
                           </div>
                         </article>
                       )

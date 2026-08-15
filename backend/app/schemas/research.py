@@ -103,10 +103,11 @@ EvaluationStatus = Literal[
 class ClaimEvaluationRead(BaseModel):
     id: int
     claim_id: int
-    evaluation_type: Literal["NUMERIC"]
+    evaluation_type: Literal["NUMERIC", "CITATION"]
     status: EvaluationStatus
     confidence: float
     reason: str
+    evidence_ids: list[str]
     claimed_values: list[dict[str, object]]
     calculated_values: list[dict[str, object]]
     verifier_version: str
@@ -114,6 +115,13 @@ class ClaimEvaluationRead(BaseModel):
 
 
 class NumericVerificationResult(BaseModel):
+    report_id: int
+    eligible_claims: int
+    verified_claims: int
+    evaluations: list[ClaimEvaluationRead]
+
+
+class CitationVerificationResult(BaseModel):
     report_id: int
     eligible_claims: int
     verified_claims: int

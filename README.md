@@ -647,6 +647,7 @@ evaluation_type
 status
 confidence
 reason
+evidence_ids
 claimed_values
 calculated_values
 verifier_version
@@ -1121,6 +1122,7 @@ GET  /api/research/reports/{report_id}
 POST /api/research/reports/{report_id}/claims/extract
 GET  /api/research/reports/{report_id}/claims
 POST /api/research/reports/{report_id}/verify-numeric
+POST /api/research/reports/{report_id}/verify-citations
 GET  /api/research/reports/{report_id}/evaluations
 
 Planned report-level evaluation endpoints:
@@ -1457,8 +1459,10 @@ It currently supports:
 - persisted, ordered claims that are idempotently reused after extraction,
 - deterministic numeric-claim verification against cited structured metric evidence,
 - persisted numeric evaluations with claimed values, calculated values, reasons, and verifier versions,
+- bounded qualitative entailment checks against only each claim's cited filing passages,
+- coexisting typed numeric and citation evaluations with audited evidence IDs and verifier versions,
 - UI actions for inspecting evidence, generating or reopening research, extracting claims, and
-  verifying numeric claims.
+  verifying numeric claims or filing citations.
 
 ## Deliberately Deferred
 
@@ -1466,10 +1470,9 @@ The following work is valuable, but was skipped so the prototype could validate 
 retrieval, and grounded-generation flow first:
 
 - multi-turn conversation history,
-- relational `claim_sources` records and independent source-entailment results,
-- independent citation, grounding, temporal, and contradiction verification,
+- relational `claim_sources` records instead of citation IDs stored only as JSON,
+- independent temporal and cross-filing contradiction verification,
 - claim-level and report-level reliability scores,
-- automated citation-entailment checks,
 - human review and approval workflows,
 - authentication, authorization, tenants, organizations, and usage quotas,
 - durable background-job orchestration, retries, dead-letter handling, and job monitoring,
@@ -1480,10 +1483,11 @@ retrieval, and grounded-generation flow first:
 - production deployment hardening, backups, retention policies, and disaster recovery,
 - licensed transcripts, market data, news, investor presentations, and other non-SEC sources.
 
-Numeric verification now covers explicit percentages and scaled or currency amounts when a claim
-cites structured metric evidence. Generated answers should still be treated as assisted research:
-users should open the attached SEC evidence before relying on a material claim, especially for
-qualitative claims that have not yet undergone independent entailment verification.
+Numeric verification covers explicit percentages and scaled or currency amounts when a claim cites
+structured metric evidence. Qualitative verification separately checks atomic claims against their
+cited filing excerpts. Generated answers should still be treated as assisted research: these checks
+are bounded prototype controls, not a guarantee, and users should open the attached SEC evidence
+before relying on a material claim.
 
 ---
 
@@ -1573,22 +1577,33 @@ Each result is persisted idempotently as `VERIFIED`, `PARTIALLY_SUPPORTED`, `UNS
 and verifier version. The UI displays these results beside their claims. A valid numeric result does
 not prove that a qualitative citation entails the surrounding claim.
 
+### Bounded Filing-Citation Entailment
+
+Qualitative claims are evaluated in a separate temperature-zero model call using only the atomic
+claim and its cited `[F#]` passages from the immutable report snapshot. Evidence excerpts have fixed
+per-passage and total-size limits. The evaluator must distinguish explicit support, partial support,
+silence, and contradiction; semantic similarity alone is explicitly insufficient.
+
+The response is schema-validated, must return exactly the requested claim IDs, and cannot introduce
+unknown evidence. Claims without stored filing citations are marked `UNSUPPORTED` without a model
+call. Results are persisted independently from numeric evaluations, including the assessed evidence
+IDs, reason, confidence, and verifier version, and are displayed alongside each atomic claim.
+
 ## Guardrails Still Needed for Production
 
-The current prototype does not yet independently verify whether each citation actually entails the
-claim beside it. A model may still misunderstand a table, overstate a driver, combine incompatible
-periods, or attach a valid source to an unsupported sentence.
+The prototype now performs independent numeric recalculation and bounded qualitative entailment
+checks, but an evaluator model can still misunderstand a passage or share biases with the generation
+model. Truncated excerpts can also omit relevant context, and the system does not yet independently
+reapply every temporal constraint or search other filings for contradictions.
 
 The production verification layer should therefore:
 
-1. Use the persisted atomic claims as independent verification units.
-2. Expand numeric parsing to ratios, per-share values, ranges, and unusual units.
-3. Check that cited passages semantically entail qualitative claims.
-4. Reject citations that are missing, invalid, or unrelated.
-5. Reapply temporal constraints independently of generation.
-6. Detect contradictions within the answer and across filings.
-7. Assign an overall reliability score from the independent claim checks.
-8. Require human review for high-impact or low-confidence outputs.
+1. Expand numeric parsing to ratios, per-share values, ranges, and unusual units.
+2. Reapply temporal constraints independently of generation.
+3. Search for counterevidence and contradictions within the answer and across filings.
+4. Add evaluator-model diversity and regression datasets to measure correlated errors.
+5. Assign an overall reliability score from the independent claim checks.
+6. Require human review for high-impact or low-confidence outputs.
 
 The goal is not to claim that the LLM cannot hallucinate. The goal is to constrain what it can see,
 preserve auditable evidence, and eventually verify its output independently.
