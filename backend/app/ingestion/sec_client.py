@@ -8,6 +8,7 @@ import httpx
 from app.core.config import settings
 
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions"
+SEC_COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts"
 SEC_ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data"
 SUPPORTED_FORMS = frozenset({"10-K", "10-Q", "8-K"})
 MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
@@ -94,6 +95,11 @@ class SECClient:
         response = await self._client.get(f"{SEC_SUBMISSIONS_URL}/CIK{cik}.json")
         response.raise_for_status()
         return parse_recent_filings(response.json(), cik)
+
+    async def get_company_facts(self, cik: str) -> dict[str, Any]:
+        response = await self._client.get(f"{SEC_COMPANY_FACTS_URL}/CIK{cik}.json")
+        response.raise_for_status()
+        return response.json()
 
     async def get_filing_document(self, document_url: str) -> str:
         hostname = urlparse(document_url).hostname
