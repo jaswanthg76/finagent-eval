@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -37,3 +37,21 @@ class ResearchAnswer(BaseModel):
     sources: list[ResearchSource]
     metrics: list[MetricEvidence]
     chunks: list[SemanticSearchResult]
+
+
+class ResearchReportRead(ResearchAnswer):
+    id: int
+    created_at: datetime
+
+
+class ResearchReportSummary(BaseModel):
+    id: int
+    ticker: str
+    question: str
+    as_of_date: date | None
+    form: str | None
+    answer: str
+    provider: str
+    model: str
+    source_count: int
+    created_at: datetime

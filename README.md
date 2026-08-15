@@ -559,24 +559,22 @@ Preserve both:
 ```text
 id
 company_id
-query
+question
 as_of_date
-report_content
+form
+answer
+provider
 model
-status
+tool_calls (JSONB)
+sources (JSONB)
+metrics (JSONB)
+chunks (JSONB)
 created_at
-updated_at
 ```
 
-Statuses:
-
-```text
-PENDING
-GENERATING
-EVALUATING
-COMPLETED
-FAILED
-```
+Each report stores an immutable snapshot of the model/tool trace and supporting evidence used when
+the answer was generated. Reopening a report does not rerun retrieval, so its citations remain
+auditable even if filings, embeddings, or retrieval behavior later change.
 
 ---
 
@@ -1111,12 +1109,14 @@ POST /api/filings/{filing_id}/ingest
 GET  /api/filings/{filing_id}/sections
 
 POST /api/research
-GET  /api/research/{report_id}
+GET  /api/research/reports
+GET  /api/research/reports/{report_id}
 
-POST /api/research/{report_id}/evaluate
+Planned evaluation endpoints:
 
-GET  /api/research/{report_id}/claims
-GET  /api/research/{report_id}/evaluation
+POST /api/research/reports/{report_id}/evaluate
+GET  /api/research/reports/{report_id}/claims
+GET  /api/research/reports/{report_id}/evaluation
 ```
 
 ---
@@ -1440,14 +1440,16 @@ It currently supports:
 - exact `ticker`, filing-form, and `as_of_date` filtering,
 - deterministic comparable-period selection and financial calculations,
 - cited answers that retain links to the underlying SEC filings,
-- UI actions for inspecting raw evidence or generating a synthesized answer.
+- persistent research reports with immutable tool and evidence snapshots,
+- report-history and report-reopen APIs scoped by company,
+- UI actions for inspecting raw evidence, generating an answer, or reopening saved research.
 
 ## Deliberately Deferred
 
 The following work is valuable, but was skipped so the prototype could validate the core ingestion,
 retrieval, and grounded-generation flow first:
 
-- persistent research reports and conversation history,
+- multi-turn conversation history,
 - atomic claim extraction and claim-to-source storage,
 - independent numeric, citation, grounding, temporal, and contradiction verification,
 - claim-level and report-level reliability scores,

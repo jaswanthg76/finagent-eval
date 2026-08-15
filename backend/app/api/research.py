@@ -2,7 +2,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +12,7 @@ from app.core.database import get_db
 from app.models.company import Company
 from app.models.filing import Filing
 from app.models.financial_metric import FinancialMetric
+from app.models.research_report import ResearchReport
 from app.research.agent import (
     AgentConfigurationError,
     AgentGenerationError,
@@ -20,6 +21,8 @@ from app.research.agent import (
 from app.research.hybrid import identify_metric_names
 from app.schemas.research import (
     ResearchAnswer,
+    ResearchReportRead,
+    ResearchReportSummary,
     ResearchRequest,
     ResearchSource,
     ResearchToolCall,
@@ -27,6 +30,24 @@ from app.schemas.research import (
 from app.schemas.retrieval import MetricEvidence, SemanticSearchResult
 
 router = APIRouter(prefix="/research", tags=["research agent"])
+
+
+def _stored_report_read(report: ResearchReport, ticker: str) -> ResearchReportRead:
+    return ResearchReportRead(
+        id=report.id,
+        ticker=ticker,
+        question=report.question,
+        as_of_date=report.as_of_date,
+        form=report.form,
+        answer=report.answer,
+        provider=report.provider,
+        model=report.model,
+        tool_calls=report.tool_calls,
+        sources=report.sources,
+        metrics=report.metrics,
+        chunks=report.chunks,
+        created_at=report.created_at,
+    )
 
 
 async def _company_or_404(ticker: str, db: AsyncSession) -> Company:
@@ -124,11 +145,11 @@ async def _metric_evidence(
     return evidence
 
 
-@router.post("", response_model=ResearchAnswer)
+@router.post("", response_model=ResearchReportRead)
 async def generate_research_answer(
     request: ResearchRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> ResearchAnswer:
+) -> ResearchReportRead:
     company = await _company_or_404(request.ticker, db)
     chunks: list[SemanticSearchResult] = []
     metrics: list[MetricEvidence] = []
@@ -276,7 +297,7 @@ async def generate_research_answer(
         )
         for index, chunk in enumerate(chunks, start=1)
     ]
-    return ResearchAnswer(
+    generated_answer = ResearchAnswer(
         ticker=company.ticker,
         question=request.question,
         as_of_date=request.as_of_date,
@@ -289,3 +310,66 @@ async def generate_research_answer(
         metrics=metrics,
         chunks=chunks,
     )
+    report = ResearchReport(
+        company_id=company.id,
+        question=generated_answer.question,
+        as_of_date=generated_answer.as_of_date,
+        form=generated_answer.form,
+        answer=generated_answer.answer,
+        provider=generated_answer.provider,
+        model=generated_answer.model,
+        tool_calls=[call.model_dump(mode="json") for call in generated_answer.tool_calls],
+        sources=[source.model_dump(mode="json") for source in generated_answer.sources],
+        metrics=[metric.model_dump(mode="json") for metric in generated_answer.metrics],
+        chunks=[chunk.model_dump(mode="json") for chunk in generated_answer.chunks],
+    )
+    db.add(report)
+    await db.commit()
+    await db.refresh(report)
+    return _stored_report_read(report, company.ticker)
+
+
+@router.get("/reports", response_model=list[ResearchReportSummary])
+async def list_research_reports(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    ticker: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> list[ResearchReportSummary]:
+    statement = select(ResearchReport, Company.ticker).join(
+        Company, Company.id == ResearchReport.company_id
+    )
+    if ticker is not None:
+        statement = statement.where(Company.ticker == ticker.upper())
+    result = await db.execute(statement.order_by(ResearchReport.created_at.desc()).limit(limit))
+    return [
+        ResearchReportSummary(
+            id=report.id,
+            ticker=company_ticker,
+            question=report.question,
+            as_of_date=report.as_of_date,
+            form=report.form,
+            answer=report.answer,
+            provider=report.provider,
+            model=report.model,
+            source_count=len(report.sources),
+            created_at=report.created_at,
+        )
+        for report, company_ticker in result.all()
+    ]
+
+
+@router.get("/reports/{report_id}", response_model=ResearchReportRead)
+async def get_research_report(
+    report_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ResearchReportRead:
+    result = await db.execute(
+        select(ResearchReport, Company.ticker)
+        .join(Company, Company.id == ResearchReport.company_id)
+        .where(ResearchReport.id == report_id)
+    )
+    row = result.one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Research report {report_id} was not found")
+    report, ticker = row
+    return _stored_report_read(report, ticker)

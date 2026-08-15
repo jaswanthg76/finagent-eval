@@ -117,6 +117,7 @@ type ResearchSource = {
 }
 
 type ResearchAnswer = {
+  id: number
   ticker: string
   question: string
   as_of_date: string | null
@@ -128,6 +129,20 @@ type ResearchAnswer = {
   sources: ResearchSource[]
   metrics: MetricEvidence[]
   chunks: SemanticSearchResult[]
+  created_at: string
+}
+
+type ResearchReportSummary = {
+  id: number
+  ticker: string
+  question: string
+  as_of_date: string | null
+  form: string | null
+  answer: string
+  provider: string
+  model: string
+  source_count: number
+  created_at: string
 }
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
@@ -192,6 +207,10 @@ function App() {
   const [isGeneratingAnswer, setIsGeneratingAnswer] = useState(false)
   const [hasSearched, setHasSearched] = useState(false)
   const [researchAnswer, setResearchAnswer] = useState<ResearchAnswer | null>(null)
+  const [savedReports, setSavedReports] = useState<ResearchReportSummary[]>([])
+  const [reportsError, setReportsError] = useState<string | null>(null)
+  const [isReportsLoading, setIsReportsLoading] = useState(false)
+  const [loadingReportId, setLoadingReportId] = useState<number | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -222,6 +241,7 @@ function App() {
   useEffect(() => {
     if (!selectedCompany) return
 
+    const companyTicker = selectedCompany.ticker
     const controller = new AbortController()
     setIsFilingsLoading(true)
     setFilingsError(null)
@@ -232,11 +252,13 @@ function App() {
     setSearchError(null)
     setHasSearched(false)
     setResearchAnswer(null)
-
+    setSavedReports([])
+    setReportsError(null)
+    setIsReportsLoading(true)
     async function loadFilings() {
       try {
         const response = await fetch(
-          `${API_URL}/api/companies/${selectedCompany?.ticker}/filings`,
+          `${API_URL}/api/companies/${companyTicker}/filings`,
           { signal: controller.signal },
         )
         if (!response.ok) throw new Error(await responseError(response))
@@ -250,7 +272,25 @@ function App() {
       }
     }
 
+    async function loadReports() {
+      try {
+        const params = new URLSearchParams({ ticker: companyTicker, limit: '20' })
+        const response = await fetch(`${API_URL}/api/research/reports?${params.toString()}`, {
+          signal: controller.signal,
+        })
+        if (!response.ok) throw new Error(await responseError(response))
+        setSavedReports((await response.json()) as ResearchReportSummary[])
+      } catch (requestError) {
+        if (requestError instanceof Error && requestError.name !== 'AbortError') {
+          setReportsError(requestError.message)
+        }
+      } finally {
+        if (!controller.signal.aborted) setIsReportsLoading(false)
+      }
+    }
+
     void loadFilings()
+    void loadReports()
     return () => controller.abort()
   }, [selectedCompany])
 
@@ -511,6 +551,21 @@ function App() {
       setSearchResults(result.chunks)
       setMetricResults(result.metrics)
       setMatchedMetricNames([...new Set(result.metrics.map((metric) => metric.metric_name))])
+      setSavedReports((currentReports) => [
+        {
+          id: result.id,
+          ticker: result.ticker,
+          question: result.question,
+          as_of_date: result.as_of_date,
+          form: result.form,
+          answer: result.answer,
+          provider: result.provider,
+          model: result.model,
+          source_count: result.sources.length,
+          created_at: result.created_at,
+        },
+        ...currentReports.filter((report) => report.id !== result.id),
+      ])
     } catch (requestError) {
       setSearchResults([])
       setMetricResults([])
@@ -518,6 +573,28 @@ function App() {
       if (requestError instanceof Error) setSearchError(requestError.message)
     } finally {
       setIsGeneratingAnswer(false)
+    }
+  }
+
+  async function loadSavedReport(reportId: number) {
+    setLoadingReportId(reportId)
+    setSearchError(null)
+    try {
+      const response = await fetch(`${API_URL}/api/research/reports/${reportId}`)
+      if (!response.ok) throw new Error(await responseError(response))
+      const result = (await response.json()) as ResearchAnswer
+      setResearchAnswer(result)
+      setSearchQuery(result.question)
+      setSearchForm(result.form ?? '')
+      setSearchAsOfDate(result.as_of_date ?? '')
+      setSearchResults(result.chunks)
+      setMetricResults(result.metrics)
+      setMatchedMetricNames([...new Set(result.metrics.map((metric) => metric.metric_name))])
+      setHasSearched(true)
+    } catch (requestError) {
+      if (requestError instanceof Error) setSearchError(requestError.message)
+    } finally {
+      setLoadingReportId(null)
     }
   }
 
@@ -685,7 +762,9 @@ function App() {
                   <p className="eyebrow">AI synthesis</p>
                   <h3>Grounded research answer</h3>
                 </div>
-                <span>{researchAnswer.model}</span>
+                <span>
+                  Saved {new Date(researchAnswer.created_at).toLocaleString()} · {researchAnswer.model}
+                </span>
               </div>
               <p className="research-answer-copy">{researchAnswer.answer}</p>
               <div className="research-tool-trace">
@@ -813,6 +892,50 @@ function App() {
               })}
             </div>
           )}
+          <section className="saved-research" aria-labelledby="saved-research-heading">
+            <div className="saved-research-heading">
+              <div>
+                <p className="eyebrow">Persistent history</p>
+                <h3 id="saved-research-heading">Saved {selectedCompany.ticker} research</h3>
+              </div>
+              {!isReportsLoading && <span>{savedReports.length} reports</span>}
+            </div>
+            {isReportsLoading && <p className="message">Loading saved research…</p>}
+            {reportsError && <div className="error" role="alert">{reportsError}</div>}
+            {!isReportsLoading && !reportsError && savedReports.length === 0 && (
+              <div className="empty-state">
+                <strong>No saved reports yet.</strong>
+                <span>Generated answers will be stored here with their evidence snapshots.</span>
+              </div>
+            )}
+            {!isReportsLoading && savedReports.length > 0 && (
+              <div className="saved-report-list">
+                {savedReports.map((report) => (
+                  <article className="saved-report-card" key={report.id}>
+                    <div>
+                      <span className="saved-report-date">
+                        {new Date(report.created_at).toLocaleString()}
+                      </span>
+                      <strong>{report.question}</strong>
+                      <p>{report.answer.slice(0, 220)}{report.answer.length > 220 ? '…' : ''}</p>
+                      <span className="saved-report-meta">
+                        {report.form ?? 'All forms'} · {report.as_of_date ?? 'Latest data'} ·{' '}
+                        {report.source_count} sources
+                      </span>
+                    </div>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={() => loadSavedReport(report.id)}
+                      disabled={loadingReportId !== null || isGeneratingAnswer || isSearching}
+                    >
+                      {loadingReportId === report.id ? 'Loading…' : 'Open report'}
+                    </button>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
         </section>
       )}
 
