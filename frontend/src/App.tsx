@@ -86,6 +86,50 @@ type SemanticSearchResult = {
   embedded_at: string
 }
 
+type MetricEvidence = {
+  metric_id: number
+  metric_name: string
+  value: string
+  unit: string
+  period_start: string | null
+  period_end: string
+  filing_date: string
+  fiscal_year: number | null
+  fiscal_period: string | null
+  form: string
+  accession_number: string
+  source_url: string | null
+}
+
+type HybridResearchResult = {
+  ticker: string
+  query: string
+  matched_metric_names: string[]
+  metrics: MetricEvidence[]
+  chunks: SemanticSearchResult[]
+}
+
+type ResearchSource = {
+  evidence_id: string
+  kind: 'filing' | 'metric'
+  title: string
+  source_url: string | null
+}
+
+type ResearchAnswer = {
+  ticker: string
+  question: string
+  as_of_date: string | null
+  form: string | null
+  answer: string
+  provider: string
+  model: string
+  tool_calls: Array<{ name: string; arguments: Record<string, unknown> }>
+  sources: ResearchSource[]
+  metrics: MetricEvidence[]
+  chunks: SemanticSearchResult[]
+}
+
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
 async function responseError(response: Response): Promise<string> {
@@ -95,6 +139,31 @@ async function responseError(response: Response): Promise<string> {
   } catch {
     return `API request failed with status ${response.status}`
   }
+}
+
+function formatMetricValue(value: string, unit: string): string {
+  const numericValue = Number(value)
+  if (!Number.isFinite(numericValue)) return `${value} ${unit}`
+
+  if (unit === 'USD') {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'USD',
+      notation: 'compact',
+      maximumFractionDigits: 2,
+    }).format(numericValue)
+  }
+  if (unit.toLowerCase().includes('usd') && unit.toLowerCase().includes('share')) {
+    return `${new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'USD',
+      maximumFractionDigits: 2,
+    }).format(numericValue)} / share`
+  }
+  return `${new Intl.NumberFormat('en-US', {
+    notation: 'compact',
+    maximumFractionDigits: 2,
+  }).format(numericValue)} ${unit}`
 }
 
 function App() {
@@ -116,9 +185,13 @@ function App() {
   const [searchForm, setSearchForm] = useState('')
   const [searchAsOfDate, setSearchAsOfDate] = useState('')
   const [searchResults, setSearchResults] = useState<SemanticSearchResult[]>([])
+  const [metricResults, setMetricResults] = useState<MetricEvidence[]>([])
+  const [matchedMetricNames, setMatchedMetricNames] = useState<string[]>([])
   const [searchError, setSearchError] = useState<string | null>(null)
   const [isSearching, setIsSearching] = useState(false)
+  const [isGeneratingAnswer, setIsGeneratingAnswer] = useState(false)
   const [hasSearched, setHasSearched] = useState(false)
+  const [researchAnswer, setResearchAnswer] = useState<ResearchAnswer | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -154,8 +227,11 @@ function App() {
     setFilingsError(null)
     setSyncMessage(null)
     setSearchResults([])
+    setMetricResults([])
+    setMatchedMetricNames([])
     setSearchError(null)
     setHasSearched(false)
+    setResearchAnswer(null)
 
     async function loadFilings() {
       try {
@@ -379,23 +455,69 @@ function App() {
     }
 
     setIsSearching(true)
+    setResearchAnswer(null)
     setSearchError(null)
     setHasSearched(true)
     try {
-      const params = new URLSearchParams({ query, limit: '8' })
+      const params = new URLSearchParams({ query, chunk_limit: '8', metric_limit: '4' })
       if (searchForm) params.set('form', searchForm)
       if (searchAsOfDate) params.set('as_of_date', searchAsOfDate)
 
       const response = await fetch(
-        `${API_URL}/api/companies/${selectedCompany.ticker}/search?${params.toString()}`,
+        `${API_URL}/api/companies/${selectedCompany.ticker}/research?${params.toString()}`,
       )
       if (!response.ok) throw new Error(await responseError(response))
-      setSearchResults((await response.json()) as SemanticSearchResult[])
+      const result = (await response.json()) as HybridResearchResult
+      setSearchResults(result.chunks)
+      setMetricResults(result.metrics)
+      setMatchedMetricNames(result.matched_metric_names)
     } catch (requestError) {
       setSearchResults([])
+      setMetricResults([])
+      setMatchedMetricNames([])
       if (requestError instanceof Error) setSearchError(requestError.message)
     } finally {
       setIsSearching(false)
+    }
+  }
+
+  async function generateResearchAnswer() {
+    if (!selectedCompany) return
+
+    const question = searchQuery.trim()
+    if (question.length < 2) {
+      setSearchError('Enter at least two characters for the research question.')
+      return
+    }
+
+    setIsGeneratingAnswer(true)
+    setSearchError(null)
+    setHasSearched(true)
+    setResearchAnswer(null)
+    try {
+      const response = await fetch(`${API_URL}/api/research`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ticker: selectedCompany.ticker,
+          question,
+          form: searchForm || null,
+          as_of_date: searchAsOfDate || null,
+        }),
+      })
+      if (!response.ok) throw new Error(await responseError(response))
+      const result = (await response.json()) as ResearchAnswer
+      setResearchAnswer(result)
+      setSearchResults(result.chunks)
+      setMetricResults(result.metrics)
+      setMatchedMetricNames([...new Set(result.metrics.map((metric) => metric.metric_name))])
+    } catch (requestError) {
+      setSearchResults([])
+      setMetricResults([])
+      setMatchedMetricNames([])
+      if (requestError instanceof Error) setSearchError(requestError.message)
+    } finally {
+      setIsGeneratingAnswer(false)
     }
   }
 
@@ -451,6 +573,7 @@ function App() {
                   isReingestingAll ||
                   isEmbeddingSyncing ||
                   isSearching ||
+                  isGeneratingAnswer ||
                   ingestingFilingId !== null
                 }
               >
@@ -470,15 +593,18 @@ function App() {
         <section className="search-section" aria-labelledby="search-heading">
           <div className="search-heading">
             <div>
-              <p className="eyebrow">Semantic retrieval</p>
-              <h2 id="search-heading">Search {selectedCompany.ticker} evidence</h2>
+              <p className="eyebrow">Research workspace</p>
+              <h2 id="search-heading">Research {selectedCompany.ticker}</h2>
               <p className="section-description">
-                Find relevant passages across embedded SEC filings. Results are evidence, not an
-                AI-generated answer.
+                Search raw SEC evidence or let the agent select filing and financial-metric tools
+                to produce a cited answer.
               </p>
             </div>
             {hasSearched && !isSearching && !searchError && (
-              <span className="count">{searchResults.length} results</span>
+              <span className="count">
+                {searchResults.length} passages
+                {metricResults.length > 0 ? ` · ${metricResults.length} facts` : ''}
+              </span>
             )}
           </div>
 
@@ -512,30 +638,138 @@ function App() {
                 onChange={(event) => setSearchAsOfDate(event.target.value)}
               />
             </label>
-            <button
-              className="sync-button search-submit"
-              type="submit"
-              disabled={
-                isSearching ||
-                isEmbeddingSyncing ||
-                isReingestingAll ||
-                bulkProgress !== null ||
-                ingestingFilingId !== null
-              }
-            >
-              {isSearching ? 'Searching…' : 'Search evidence'}
-            </button>
+            <div className="search-actions">
+              <button
+                className="secondary-button search-submit"
+                type="submit"
+                disabled={
+                  isSearching ||
+                  isGeneratingAnswer ||
+                  isEmbeddingSyncing ||
+                  isReingestingAll ||
+                  bulkProgress !== null ||
+                  ingestingFilingId !== null
+                }
+              >
+                {isSearching ? 'Searching…' : 'Search evidence'}
+              </button>
+              <button
+                className="sync-button search-submit"
+                type="button"
+                onClick={generateResearchAnswer}
+                disabled={
+                  isSearching ||
+                  isGeneratingAnswer ||
+                  isEmbeddingSyncing ||
+                  isReingestingAll ||
+                  bulkProgress !== null ||
+                  ingestingFilingId !== null
+                }
+              >
+                {isGeneratingAnswer ? 'Researching…' : 'Generate answer'}
+              </button>
+            </div>
           </form>
 
           {searchError && <div className="error search-feedback" role="alert">{searchError}</div>}
           {isSearching && <p className="message search-feedback">Ranking filing passages…</p>}
-          {hasSearched && !isSearching && !searchError && searchResults.length === 0 && (
+          {isGeneratingAnswer && (
+            <p className="message search-feedback">
+              Selecting tools, retrieving SEC evidence, and drafting a cited answer…
+            </p>
+          )}
+          {researchAnswer && !isGeneratingAnswer && (
+            <article className="research-answer" aria-live="polite">
+              <div className="research-answer-header">
+                <div>
+                  <p className="eyebrow">AI synthesis</p>
+                  <h3>Grounded research answer</h3>
+                </div>
+                <span>{researchAnswer.model}</span>
+              </div>
+              <p className="research-answer-copy">{researchAnswer.answer}</p>
+              <div className="research-tool-trace">
+                {researchAnswer.tool_calls.map((call, index) => (
+                  <span key={`${call.name}-${index}`}>{call.name.replaceAll('_', ' ')}</span>
+                ))}
+              </div>
+              {researchAnswer.sources.length > 0 && (
+                <div className="research-sources">
+                  <strong>Evidence used</strong>
+                  <div>
+                    {researchAnswer.sources.map((source) => (
+                      source.source_url ? (
+                        <a
+                          key={source.evidence_id}
+                          href={source.source_url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          [{source.evidence_id}] {source.title} ↗
+                        </a>
+                      ) : (
+                        <span key={source.evidence_id}>
+                          [{source.evidence_id}] {source.title}
+                        </span>
+                      )
+                    ))}
+                  </div>
+                </div>
+              )}
+            </article>
+          )}
+          {hasSearched &&
+            !isSearching &&
+            !isGeneratingAnswer &&
+            !searchError &&
+            searchResults.length === 0 &&
+            metricResults.length === 0 && (
             <div className="empty-state search-feedback">
               <strong>No matching evidence found.</strong>
               <span>Try a broader question or remove a filing filter.</span>
             </div>
           )}
-          {!isSearching && searchResults.length > 0 && (
+          {!isSearching && !isGeneratingAnswer && metricResults.length > 0 && (
+            <section className="metric-evidence" aria-labelledby="metric-evidence-heading">
+              <div className="metric-evidence-heading">
+                <div>
+                  <p className="eyebrow">Structured facts</p>
+                  <h3 id="metric-evidence-heading">Exact financial evidence</h3>
+                </div>
+                <span>{matchedMetricNames.join(' · ')}</span>
+              </div>
+              <div className="metric-evidence-grid">
+                {metricResults.map((metric) => (
+                  <article className="metric-card" key={metric.metric_id}>
+                    <div className="metric-card-header">
+                      <span className="form-badge">{metric.form}</span>
+                      <span>
+                        {metric.fiscal_year ? `FY${metric.fiscal_year}` : 'Fiscal period'}
+                        {metric.fiscal_period ? ` ${metric.fiscal_period}` : ''}
+                      </span>
+                    </div>
+                    <p>{metric.metric_name}</p>
+                    <strong title={`${metric.value} ${metric.unit}`}>
+                      {formatMetricValue(metric.value, metric.unit)}
+                    </strong>
+                    <div className="metric-period">
+                      <span>
+                        {metric.period_start
+                          ? `${metric.period_start} → ${metric.period_end}`
+                          : `As of ${metric.period_end}`}
+                      </span>
+                      {metric.source_url && (
+                        <a href={metric.source_url} target="_blank" rel="noreferrer">
+                          SEC <span aria-hidden="true">↗</span>
+                        </a>
+                      )}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </section>
+          )}
+          {!isSearching && !isGeneratingAnswer && searchResults.length > 0 && (
             <div className="evidence-results" aria-live="polite">
               {searchResults.map((result, index) => {
                 const excerpt = result.content.slice(0, 700)
@@ -601,6 +835,7 @@ function App() {
                   isReingestingAll ||
                   isEmbeddingSyncing ||
                   isSearching ||
+                  isGeneratingAnswer ||
                   ingestingFilingId !== null ||
                   filings.length === 0
                 }
@@ -619,6 +854,7 @@ function App() {
                   isSyncing ||
                   isEmbeddingSyncing ||
                   isSearching ||
+                  isGeneratingAnswer ||
                   ingestingFilingId !== null
                 }
                 title="Regenerate sections and chunks for every stored filing"
@@ -635,6 +871,7 @@ function App() {
                   isReingestingAll ||
                   bulkProgress !== null ||
                   isSearching ||
+                  isGeneratingAnswer ||
                   ingestingFilingId !== null ||
                   isFilingsLoading ||
                   !filings.some((filing) => filing.ingested_at !== null)
@@ -652,6 +889,7 @@ function App() {
                   isReingestingAll ||
                   isEmbeddingSyncing ||
                   isSearching ||
+                  isGeneratingAnswer ||
                   bulkProgress !== null ||
                   ingestingFilingId !== null
                 }
@@ -728,7 +966,8 @@ function App() {
                         isSyncing ||
                         isReingestingAll ||
                         isEmbeddingSyncing ||
-                        isSearching
+                        isSearching ||
+                        isGeneratingAnswer
                       }
                     >
                       {ingestingFilingId === filing.id

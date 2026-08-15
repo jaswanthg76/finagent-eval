@@ -1328,12 +1328,14 @@ DATABASE_URL=
 
 REDIS_URL=
 
-AI_PROVIDER=
-AI_API_KEY=
-AI_MODEL=
+AI_PROVIDER=groq
+AI_MODEL=llama-3.3-70b-versatile
+GROQ_API_KEY=
 
-EMBEDDING_PROVIDER=
-EMBEDDING_MODEL=
+EMBEDDING_PROVIDER=local
+EMBEDDING_MODEL=jinaai/jina-embeddings-v2-small-en
+EMBEDDING_DIMENSIONS=512
+EMBEDDING_BATCH_SIZE=32
 
 SEC_USER_AGENT=
 
@@ -1419,6 +1421,134 @@ Build in this order:
 
 23. Backend deployment
 ```
+
+---
+
+# Current Prototype Scope
+
+The current implementation is intentionally a research prototype, not a production financial
+advice system.
+
+It currently supports:
+
+- syncing SEC filing metadata and document content,
+- extracting filing sections and creating model-token-based chunks,
+- ingesting normalized SEC Company Facts / XBRL metrics,
+- generating local embeddings and searching filing chunks with pgvector,
+- hybrid retrieval of qualitative filing passages and quantitative facts,
+- a Groq-hosted research agent with controlled retrieval tools,
+- exact `ticker`, filing-form, and `as_of_date` filtering,
+- deterministic comparable-period selection and financial calculations,
+- cited answers that retain links to the underlying SEC filings,
+- UI actions for inspecting raw evidence or generating a synthesized answer.
+
+## Deliberately Deferred
+
+The following work is valuable, but was skipped so the prototype could validate the core ingestion,
+retrieval, and grounded-generation flow first:
+
+- persistent research reports and conversation history,
+- atomic claim extraction and claim-to-source storage,
+- independent numeric, citation, grounding, temporal, and contradiction verification,
+- claim-level and report-level reliability scores,
+- automated citation-entailment checks,
+- human review and approval workflows,
+- authentication, authorization, tenants, organizations, and usage quotas,
+- durable background-job orchestration, retries, dead-letter handling, and job monitoring,
+- production observability, tracing, model-cost tracking, and alerting,
+- prompt and model versioning with regression evaluation datasets,
+- response streaming, cancellation, and long-running research jobs,
+- broader test coverage against malformed filings, XBRL restatements, and provider failures,
+- production deployment hardening, backups, retention policies, and disaster recovery,
+- licensed transcripts, market data, news, investor presentations, and other non-SEC sources.
+
+Until the independent verification pipeline is implemented, generated answers should be treated as
+assisted research. Users should open the attached SEC evidence before relying on a material claim.
+
+---
+
+# AI Grounding and Hallucination Guardrails
+
+These controls reduce hallucination risk; they do not prove that every generated sentence is true.
+
+## Controls Implemented in the Prototype
+
+### Controlled Tool Access
+
+The model cannot query database tables or choose an arbitrary company. It can request only the
+application-defined tools:
+
+```text
+search_filings
+get_financial_metrics
+```
+
+The backend fixes the company from the research request, validates all tool arguments, rejects extra
+arguments, restricts metrics to a canonical allowlist, and enforces small result limits.
+
+### Data-Layer Scope Enforcement
+
+Company, filing type, and historical cut-off filters are applied in SQL before evidence is returned
+to the model:
+
+```text
+company_id = selected company
+form = requested form
+filing_date <= as_of_date
+```
+
+For questions about recent results, filing retrieval is restricted to recent filings. Questions
+about causes or drivers prefer Management's Discussion and Analysis sections. The prompt is not
+trusted to enforce these boundaries.
+
+### Structured Quantitative Path
+
+Explicit financial terms such as revenue or diluted EPS trigger structured metric retrieval before
+generation. The model does not need to infer numbers from prose.
+
+Comparable-period selection prefers facts with the same fiscal period and similar duration.
+Absolute and percentage changes are calculated by backend code and supplied to the model as
+`deterministic_comparisons`; the model is instructed not to recalculate them.
+
+### Evidence-Preserving Generation
+
+Every returned fact or filing passage receives an evidence ID:
+
+```text
+[M1] structured financial metric
+[F1] SEC filing passage
+```
+
+The model is instructed to cite only these IDs, avoid unsupported values and periods, distinguish
+narrative drivers from coincidental movements, and state when evidence is insufficient. The API
+returns the complete evidence objects and SEC URLs alongside the answer so the UI can expose the
+primary sources independently of the generated prose.
+
+### Bounded Agent Execution
+
+Agent execution uses temperature-zero generation, a bounded tool-call loop, validated schemas,
+compact model-facing excerpts, and fixed evidence limits. These controls reduce uncontrolled
+behavior, latency, token usage, and the opportunity for irrelevant context to influence the answer.
+
+## Guardrails Still Needed for Production
+
+The current prototype does not yet independently verify whether each citation actually entails the
+claim beside it. A model may still misunderstand a table, overstate a driver, combine incompatible
+periods, or attach a valid source to an unsupported sentence.
+
+The production verification layer should therefore:
+
+1. Decompose every answer into atomic claims.
+2. Recalculate every numeric claim from stored structured facts.
+3. Check that cited passages semantically entail qualitative claims.
+4. Reject citations that are missing, invalid, or unrelated.
+5. Reapply temporal constraints independently of generation.
+6. Detect contradictions within the answer and across filings.
+7. Assign claim-level statuses and an overall reliability score.
+8. Require human review for high-impact or low-confidence outputs.
+
+The goal is not to claim that the LLM cannot hallucinate. The goal is to constrain what it can see,
+preserve auditable evidence, and eventually verify its output independently.
 
 ---
 

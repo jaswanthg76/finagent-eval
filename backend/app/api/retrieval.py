@@ -12,13 +12,20 @@ from app.models.company import Company
 from app.models.filing import Filing
 from app.models.filing_chunk import FilingChunk
 from app.models.filing_section import FilingSection
+from app.models.financial_metric import FinancialMetric
+from app.research.hybrid import identify_metric_names
 from app.retrieval.embeddings import (
     EmbeddingConfigurationError,
     EmbeddingGenerationError,
     content_hash,
     create_embedding_client,
 )
-from app.schemas.retrieval import ChunkEmbeddingSyncResult, SemanticSearchResult
+from app.schemas.retrieval import (
+    ChunkEmbeddingSyncResult,
+    HybridResearchResult,
+    MetricEvidence,
+    SemanticSearchResult,
+)
 
 router = APIRouter(prefix="/companies/{ticker}", tags=["retrieval"])
 
@@ -106,6 +113,26 @@ async def semantic_search(
     limit: Annotated[int, Query(ge=1, le=50)] = 10,
 ) -> list[SemanticSearchResult]:
     company = await _company_or_404(ticker, db)
+    return await _semantic_search_for_company(
+        company=company,
+        query=query,
+        db=db,
+        as_of_date=as_of_date,
+        form=form,
+        limit=limit,
+    )
+
+
+async def _semantic_search_for_company(
+    company: Company,
+    query: str,
+    db: AsyncSession,
+    as_of_date: date | None,
+    form: str | None,
+    limit: int,
+    filed_after: date | None = None,
+    section_name: str | None = None,
+) -> list[SemanticSearchResult]:
     available_statement = (
         select(func.count())
         .select_from(FilingChunk)
@@ -155,8 +182,12 @@ async def semantic_search(
     )
     if as_of_date is not None:
         statement = statement.where(Filing.filing_date <= as_of_date)
+    if filed_after is not None:
+        statement = statement.where(Filing.filing_date >= filed_after)
     if form is not None:
         statement = statement.where(Filing.form == form.upper())
+    if section_name is not None:
+        statement = statement.where(FilingSection.section_name == section_name)
 
     result = await db.execute(statement.order_by(distance).limit(limit))
     return [
@@ -177,3 +208,85 @@ async def semantic_search(
         )
         for row in result
     ]
+
+
+@router.get("/research", response_model=HybridResearchResult)
+async def hybrid_research(
+    ticker: str,
+    query: Annotated[str, Query(min_length=2, max_length=2_000)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    as_of_date: date | None = None,
+    form: str | None = None,
+    chunk_limit: Annotated[int, Query(ge=1, le=50)] = 8,
+    metric_limit: Annotated[int, Query(ge=1, le=10)] = 4,
+) -> HybridResearchResult:
+    company = await _company_or_404(ticker, db)
+    chunks = await _semantic_search_for_company(
+        company=company,
+        query=query,
+        db=db,
+        as_of_date=as_of_date,
+        form=form,
+        limit=chunk_limit,
+    )
+
+    matched_metric_names = identify_metric_names(query)
+    metrics: list[MetricEvidence] = []
+    if matched_metric_names:
+        statement = (
+            select(FinancialMetric, Filing.document_url)
+            .outerjoin(Filing, Filing.id == FinancialMetric.filing_id)
+            .where(
+                FinancialMetric.company_id == company.id,
+                FinancialMetric.metric_name.in_(matched_metric_names),
+            )
+        )
+        if as_of_date is not None:
+            statement = statement.where(FinancialMetric.filing_date <= as_of_date)
+        if form is not None:
+            statement = statement.where(FinancialMetric.form == form.upper())
+
+        metric_result = await db.execute(
+            statement.order_by(
+                FinancialMetric.period_end.desc(),
+                FinancialMetric.filing_date.desc(),
+                FinancialMetric.id.desc(),
+            )
+        )
+        counts = {metric_name: 0 for metric_name in matched_metric_names}
+        seen_periods: set[tuple[str, date | None, date, str]] = set()
+        for metric, source_url in metric_result.all():
+            identity = (
+                metric.metric_name,
+                metric.period_start,
+                metric.period_end,
+                metric.unit,
+            )
+            if identity in seen_periods or counts[metric.metric_name] >= metric_limit:
+                continue
+            seen_periods.add(identity)
+            counts[metric.metric_name] += 1
+            metrics.append(
+                MetricEvidence(
+                    metric_id=metric.id,
+                    metric_name=metric.metric_name,
+                    value=metric.value,
+                    unit=metric.unit,
+                    period_start=metric.period_start,
+                    period_end=metric.period_end,
+                    filing_date=metric.filing_date,
+                    fiscal_year=metric.fiscal_year,
+                    fiscal_period=metric.fiscal_period,
+                    form=metric.form,
+                    accession_number=metric.accession_number,
+                    source_url=source_url,
+                )
+            )
+
+    return HybridResearchResult(
+        ticker=company.ticker,
+        query=query,
+        matched_metric_names=matched_metric_names,
+        metrics=metrics,
+        chunks=chunks,
+    )

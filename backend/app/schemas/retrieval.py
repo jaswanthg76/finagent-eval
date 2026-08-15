@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from decimal import Decimal
 
 from pydantic import BaseModel
 
@@ -29,3 +30,25 @@ class SemanticSearchResult(BaseModel):
     source_url: str
     embedded_at: datetime
 
+
+class MetricEvidence(BaseModel):
+    metric_id: int
+    metric_name: str
+    value: Decimal
+    unit: str
+    period_start: date | None
+    period_end: date
+    filing_date: date
+    fiscal_year: int | None
+    fiscal_period: str | None
+    form: str
+    accession_number: str
+    source_url: str | None
+
+
+class HybridResearchResult(BaseModel):
+    ticker: str
+    query: str
+    matched_metric_names: list[str]
+    metrics: list[MetricEvidence]
+    chunks: list[SemanticSearchResult]
