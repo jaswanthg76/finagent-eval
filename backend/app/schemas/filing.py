@@ -40,3 +40,16 @@ class FilingIngestResult(BaseModel):
     sections_created: int
     chunks_created: int
     ingested_at: datetime
+
+
+class FilingReingestFailure(BaseModel):
+    filing_id: int
+    detail: str
+
+
+class FilingsReingestResult(BaseModel):
+    total: int
+    succeeded: int
+    failed: int
+    results: list[FilingIngestResult]
+    failures: list[FilingReingestFailure]

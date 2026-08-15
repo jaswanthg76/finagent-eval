@@ -35,6 +35,17 @@ type FilingIngestResult = {
   ingested_at: string
 }
 
+type FilingsReingestResult = {
+  total: number
+  succeeded: number
+  failed: number
+  results: FilingIngestResult[]
+  failures: Array<{
+    filing_id: number
+    detail: string
+  }>
+}
+
 type BulkIngestProgress = {
   completed: number
   total: number
@@ -62,6 +73,7 @@ function App() {
   const [isCompaniesLoading, setIsCompaniesLoading] = useState(true)
   const [isFilingsLoading, setIsFilingsLoading] = useState(false)
   const [isSyncing, setIsSyncing] = useState(false)
+  const [isReingestingAll, setIsReingestingAll] = useState(false)
   const [ingestingFilingId, setIngestingFilingId] = useState<number | null>(null)
   const [bulkProgress, setBulkProgress] = useState<BulkIngestProgress | null>(null)
 
@@ -226,6 +238,43 @@ function App() {
     }
   }
 
+  async function reingestAllFilings() {
+    if (!selectedCompany) return
+
+    setIsReingestingAll(true)
+    setFilingsError(null)
+    setSyncMessage(null)
+    try {
+      const response = await fetch(`${API_URL}/api/filings/reingest-all`, {
+        method: 'POST',
+      })
+      if (!response.ok) throw new Error(await responseError(response))
+      const result = (await response.json()) as FilingsReingestResult
+
+      const filingsResponse = await fetch(
+        `${API_URL}/api/companies/${selectedCompany.ticker}/filings`,
+      )
+      if (!filingsResponse.ok) throw new Error(await responseError(filingsResponse))
+      setFilings((await filingsResponse.json()) as Filing[])
+
+      if (result.total === 0) {
+        setSyncMessage('There are no stored filings to re-ingest.')
+      } else {
+        setSyncMessage(`Re-ingested ${result.succeeded} of ${result.total} stored filings.`)
+      }
+      if (result.failed > 0) {
+        const firstFailure = result.failures[0]
+        setFilingsError(
+          `${result.failed} filings failed. First error: ${firstFailure?.detail ?? 'Unknown error'}`,
+        )
+      }
+    } catch (requestError) {
+      if (requestError instanceof Error) setFilingsError(requestError.message)
+    } finally {
+      setIsReingestingAll(false)
+    }
+  }
+
   return (
     <main>
       <header className="site-header">
@@ -272,7 +321,12 @@ function App() {
                 type="button"
                 aria-pressed={selectedCompany?.id === company.id}
                 onClick={() => setSelectedCompany(company)}
-                disabled={bulkProgress !== null || isSyncing || ingestingFilingId !== null}
+                disabled={
+                  bulkProgress !== null ||
+                  isSyncing ||
+                  isReingestingAll ||
+                  ingestingFilingId !== null
+                }
               >
                 <span className="ticker">{company.ticker}</span>
                 <span className="company-copy">
@@ -302,6 +356,7 @@ function App() {
                 disabled={
                   bulkProgress !== null ||
                   isSyncing ||
+                  isReingestingAll ||
                   ingestingFilingId !== null ||
                   filings.length === 0
                 }
@@ -311,10 +366,29 @@ function App() {
                   : 'Ingest all pending'}
               </button>
               <button
+                className="secondary-button"
+                type="button"
+                onClick={reingestAllFilings}
+                disabled={
+                  isReingestingAll ||
+                  bulkProgress !== null ||
+                  isSyncing ||
+                  ingestingFilingId !== null
+                }
+                title="Regenerate sections and chunks for every stored filing"
+              >
+                {isReingestingAll ? 'Re-ingesting all…' : 'Re-ingest all'}
+              </button>
+              <button
                 className="sync-button"
                 type="button"
                 onClick={syncFilings}
-                disabled={isSyncing || bulkProgress !== null || ingestingFilingId !== null}
+                disabled={
+                  isSyncing ||
+                  isReingestingAll ||
+                  bulkProgress !== null ||
+                  ingestingFilingId !== null
+                }
               >
                 {isSyncing ? 'Syncing…' : 'Sync SEC filings'}
               </button>
@@ -329,6 +403,15 @@ function App() {
               </div>
               <progress value={bulkProgress.completed} max={bulkProgress.total} />
               {bulkProgress.failed > 0 && <small>{bulkProgress.failed} failed</small>}
+            </div>
+          )}
+          {isReingestingAll && (
+            <div className="bulk-progress" role="status">
+              <div>
+                <strong>Re-ingesting all stored filings</strong>
+                <span>Regenerating sections and token-based chunks…</span>
+              </div>
+              <progress />
             </div>
           )}
           {syncMessage && <p className="success" role="status">{syncMessage}</p>}
@@ -356,7 +439,10 @@ function App() {
                       type="button"
                       onClick={() => ingestFilingContent(filing)}
                       disabled={
-                        ingestingFilingId !== null || bulkProgress !== null || isSyncing
+                        ingestingFilingId !== null ||
+                        bulkProgress !== null ||
+                        isSyncing ||
+                        isReingestingAll
                       }
                     >
                       {ingestingFilingId === filing.id
