@@ -55,3 +55,37 @@ class ResearchReportSummary(BaseModel):
     model: str
     source_count: int
     created_at: datetime
+
+
+ClaimType = Literal[
+    "NUMERIC",
+    "FACTUAL",
+    "MANAGEMENT_STATEMENT",
+    "COMPARATIVE",
+    "TEMPORAL",
+    "OTHER",
+]
+
+
+class ExtractedClaim(BaseModel):
+    claim_text: str = Field(min_length=2, max_length=2_000)
+    claim_type: ClaimType
+    citation_ids: list[str] = Field(default_factory=list, max_length=20)
+
+
+class ExtractedClaimsPayload(BaseModel):
+    claims: list[ExtractedClaim] = Field(min_length=1, max_length=30)
+
+
+class ResearchClaimRead(ExtractedClaim):
+    id: int
+    report_id: int
+    claim_index: int
+    created_at: datetime
+
+
+class ClaimExtractionResult(BaseModel):
+    report_id: int
+    extracted: int
+    model: str
+    claims: list[ResearchClaimRead]

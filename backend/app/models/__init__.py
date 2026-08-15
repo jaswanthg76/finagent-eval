@@ -6,6 +6,7 @@ from app.models.filing import Filing
 from app.models.filing_chunk import FilingChunk
 from app.models.filing_section import FilingSection
 from app.models.financial_metric import FinancialMetric
+from app.models.research_claim import ResearchClaim
 from app.models.research_report import ResearchReport
 
 __all__ = [
@@ -15,5 +16,6 @@ __all__ = [
     "FilingChunk",
     "FilingSection",
     "FinancialMetric",
+    "ResearchClaim",
     "ResearchReport",
 ]

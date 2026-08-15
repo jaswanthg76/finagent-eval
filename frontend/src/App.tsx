@@ -145,6 +145,29 @@ type ResearchReportSummary = {
   created_at: string
 }
 
+type ResearchClaim = {
+  id: number
+  report_id: number
+  claim_index: number
+  claim_text: string
+  claim_type:
+    | 'NUMERIC'
+    | 'FACTUAL'
+    | 'MANAGEMENT_STATEMENT'
+    | 'COMPARATIVE'
+    | 'TEMPORAL'
+    | 'OTHER'
+  citation_ids: string[]
+  created_at: string
+}
+
+type ClaimExtractionResult = {
+  report_id: number
+  extracted: number
+  model: string
+  claims: ResearchClaim[]
+}
+
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
 async function responseError(response: Response): Promise<string> {
@@ -211,6 +234,9 @@ function App() {
   const [reportsError, setReportsError] = useState<string | null>(null)
   const [isReportsLoading, setIsReportsLoading] = useState(false)
   const [loadingReportId, setLoadingReportId] = useState<number | null>(null)
+  const [researchClaims, setResearchClaims] = useState<ResearchClaim[]>([])
+  const [claimsError, setClaimsError] = useState<string | null>(null)
+  const [isExtractingClaims, setIsExtractingClaims] = useState(false)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -252,6 +278,8 @@ function App() {
     setSearchError(null)
     setHasSearched(false)
     setResearchAnswer(null)
+    setResearchClaims([])
+    setClaimsError(null)
     setSavedReports([])
     setReportsError(null)
     setIsReportsLoading(true)
@@ -496,6 +524,8 @@ function App() {
 
     setIsSearching(true)
     setResearchAnswer(null)
+    setResearchClaims([])
+    setClaimsError(null)
     setSearchError(null)
     setHasSearched(true)
     try {
@@ -534,6 +564,8 @@ function App() {
     setSearchError(null)
     setHasSearched(true)
     setResearchAnswer(null)
+    setResearchClaims([])
+    setClaimsError(null)
     try {
       const response = await fetch(`${API_URL}/api/research`, {
         method: 'POST',
@@ -579,11 +611,17 @@ function App() {
   async function loadSavedReport(reportId: number) {
     setLoadingReportId(reportId)
     setSearchError(null)
+    setClaimsError(null)
     try {
-      const response = await fetch(`${API_URL}/api/research/reports/${reportId}`)
-      if (!response.ok) throw new Error(await responseError(response))
-      const result = (await response.json()) as ResearchAnswer
+      const [reportResponse, claimsResponse] = await Promise.all([
+        fetch(`${API_URL}/api/research/reports/${reportId}`),
+        fetch(`${API_URL}/api/research/reports/${reportId}/claims`),
+      ])
+      if (!reportResponse.ok) throw new Error(await responseError(reportResponse))
+      if (!claimsResponse.ok) throw new Error(await responseError(claimsResponse))
+      const result = (await reportResponse.json()) as ResearchAnswer
       setResearchAnswer(result)
+      setResearchClaims((await claimsResponse.json()) as ResearchClaim[])
       setSearchQuery(result.question)
       setSearchForm(result.form ?? '')
       setSearchAsOfDate(result.as_of_date ?? '')
@@ -595,6 +633,26 @@ function App() {
       if (requestError instanceof Error) setSearchError(requestError.message)
     } finally {
       setLoadingReportId(null)
+    }
+  }
+
+  async function extractClaims() {
+    if (!researchAnswer) return
+
+    setIsExtractingClaims(true)
+    setClaimsError(null)
+    try {
+      const response = await fetch(
+        `${API_URL}/api/research/reports/${researchAnswer.id}/claims/extract`,
+        { method: 'POST' },
+      )
+      if (!response.ok) throw new Error(await responseError(response))
+      const result = (await response.json()) as ClaimExtractionResult
+      setResearchClaims(result.claims)
+    } catch (requestError) {
+      if (requestError instanceof Error) setClaimsError(requestError.message)
+    } finally {
+      setIsExtractingClaims(false)
     }
   }
 
@@ -762,9 +820,24 @@ function App() {
                   <p className="eyebrow">AI synthesis</p>
                   <h3>Grounded research answer</h3>
                 </div>
-                <span>
-                  Saved {new Date(researchAnswer.created_at).toLocaleString()} · {researchAnswer.model}
-                </span>
+                <div className="research-answer-actions">
+                  <span>
+                    Saved {new Date(researchAnswer.created_at).toLocaleString()} ·{' '}
+                    {researchAnswer.model}
+                  </span>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={extractClaims}
+                    disabled={isExtractingClaims || researchClaims.length > 0}
+                  >
+                    {isExtractingClaims
+                      ? 'Extracting claims…'
+                      : researchClaims.length > 0
+                        ? `${researchClaims.length} claims extracted`
+                        : 'Extract atomic claims'}
+                  </button>
+                </div>
               </div>
               <p className="research-answer-copy">{researchAnswer.answer}</p>
               <div className="research-tool-trace">
@@ -794,6 +867,37 @@ function App() {
                     ))}
                   </div>
                 </div>
+              )}
+              {claimsError && <div className="error claim-feedback" role="alert">{claimsError}</div>}
+              {researchClaims.length > 0 && (
+                <section className="claim-results" aria-labelledby="claim-results-heading">
+                  <div className="claim-results-heading">
+                    <strong id="claim-results-heading">Atomic claims</strong>
+                    <span>Ready for independent verification</span>
+                  </div>
+                  <div className="claim-list">
+                    {researchClaims.map((claim) => (
+                      <article className="claim-card" key={claim.id}>
+                        <span className="claim-index">
+                          {String(claim.claim_index).padStart(2, '0')}
+                        </span>
+                        <div>
+                          <span className="claim-type">
+                            {claim.claim_type.replaceAll('_', ' ')}
+                          </span>
+                          <p>{claim.claim_text}</p>
+                          <div className="claim-citations">
+                            {claim.citation_ids.length > 0
+                              ? claim.citation_ids.map((citationId) => (
+                                  <span key={citationId}>[{citationId}]</span>
+                                ))
+                              : <span>Uncited</span>}
+                          </div>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </section>
               )}
             </article>
           )}

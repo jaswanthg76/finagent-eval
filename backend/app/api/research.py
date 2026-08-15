@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.retrieval import _semantic_search_for_company
@@ -12,15 +12,24 @@ from app.core.database import get_db
 from app.models.company import Company
 from app.models.filing import Filing
 from app.models.financial_metric import FinancialMetric
+from app.models.research_claim import ResearchClaim
 from app.models.research_report import ResearchReport
 from app.research.agent import (
     AgentConfigurationError,
     AgentGenerationError,
     GroqResearchAgent,
 )
+from app.research.claims import (
+    CLAIM_EXTRACTION_PROMPT_VERSION,
+    ClaimExtractionConfigurationError,
+    ClaimExtractionError,
+    GroqClaimExtractor,
+)
 from app.research.hybrid import identify_metric_names
 from app.schemas.research import (
+    ClaimExtractionResult,
     ResearchAnswer,
+    ResearchClaimRead,
     ResearchReportRead,
     ResearchReportSummary,
     ResearchRequest,
@@ -47,6 +56,18 @@ def _stored_report_read(report: ResearchReport, ticker: str) -> ResearchReportRe
         metrics=report.metrics,
         chunks=report.chunks,
         created_at=report.created_at,
+    )
+
+
+def _claim_read(claim: ResearchClaim) -> ResearchClaimRead:
+    return ResearchClaimRead(
+        id=claim.id,
+        report_id=claim.report_id,
+        claim_index=claim.claim_index,
+        claim_text=claim.claim_text,
+        claim_type=claim.claim_type,
+        citation_ids=claim.citation_ids,
+        created_at=claim.created_at,
     )
 
 
@@ -373,3 +394,90 @@ async def get_research_report(
         raise HTTPException(status_code=404, detail=f"Research report {report_id} was not found")
     report, ticker = row
     return _stored_report_read(report, ticker)
+
+
+@router.get("/reports/{report_id}/claims", response_model=list[ResearchClaimRead])
+async def list_research_claims(
+    report_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[ResearchClaimRead]:
+    if await db.scalar(select(ResearchReport.id).where(ResearchReport.id == report_id)) is None:
+        raise HTTPException(status_code=404, detail=f"Research report {report_id} was not found")
+    result = await db.execute(
+        select(ResearchClaim)
+        .where(ResearchClaim.report_id == report_id)
+        .order_by(ResearchClaim.claim_index)
+    )
+    return [_claim_read(claim) for claim in result.scalars().all()]
+
+
+@router.post(
+    "/reports/{report_id}/claims/extract",
+    response_model=ClaimExtractionResult,
+)
+async def extract_research_claims(
+    report_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    force: bool = False,
+) -> ClaimExtractionResult:
+    report = await db.scalar(select(ResearchReport).where(ResearchReport.id == report_id))
+    if report is None:
+        raise HTTPException(status_code=404, detail=f"Research report {report_id} was not found")
+
+    existing_result = await db.execute(
+        select(ResearchClaim)
+        .where(ResearchClaim.report_id == report_id)
+        .order_by(ResearchClaim.claim_index)
+    )
+    existing = list(existing_result.scalars().all())
+    if existing and not force:
+        extraction_model = str(existing[0].extraction_metadata.get("model", settings.ai_model))
+        return ClaimExtractionResult(
+            report_id=report_id,
+            extracted=len(existing),
+            model=extraction_model,
+            claims=[_claim_read(claim) for claim in existing],
+        )
+
+    available_evidence_ids = {
+        str(source["evidence_id"]).upper()
+        for source in report.sources
+        if source.get("evidence_id")
+    }
+    try:
+        extracted = await GroqClaimExtractor().extract(
+            answer=report.answer,
+            available_evidence_ids=available_evidence_ids,
+        )
+    except ClaimExtractionConfigurationError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except ClaimExtractionError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+    if existing:
+        await db.execute(delete(ResearchClaim).where(ResearchClaim.report_id == report_id))
+    claims = [
+        ResearchClaim(
+            report_id=report_id,
+            claim_index=index,
+            claim_text=claim.claim_text,
+            claim_type=claim.claim_type,
+            citation_ids=claim.citation_ids,
+            extraction_metadata={
+                "provider": settings.ai_provider,
+                "model": settings.ai_model,
+                "prompt_version": CLAIM_EXTRACTION_PROMPT_VERSION,
+            },
+        )
+        for index, claim in enumerate(extracted, start=1)
+    ]
+    db.add_all(claims)
+    await db.commit()
+    for claim in claims:
+        await db.refresh(claim)
+    return ClaimExtractionResult(
+        report_id=report_id,
+        extracted=len(claims),
+        model=settings.ai_model,
+        claims=[_claim_read(claim) for claim in claims],
+    )

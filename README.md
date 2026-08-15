@@ -583,8 +583,11 @@ auditable even if filings, embeddings, or retrieval behavior later change.
 ```text
 id
 report_id
+claim_index
 claim_text
 claim_type
+citation_ids (JSONB)
+extraction_metadata (JSONB)
 created_at
 ```
 
@@ -1111,11 +1114,12 @@ GET  /api/filings/{filing_id}/sections
 POST /api/research
 GET  /api/research/reports
 GET  /api/research/reports/{report_id}
+POST /api/research/reports/{report_id}/claims/extract
+GET  /api/research/reports/{report_id}/claims
 
 Planned evaluation endpoints:
 
 POST /api/research/reports/{report_id}/evaluate
-GET  /api/research/reports/{report_id}/claims
 GET  /api/research/reports/{report_id}/evaluation
 ```
 
@@ -1442,7 +1446,9 @@ It currently supports:
 - cited answers that retain links to the underlying SEC filings,
 - persistent research reports with immutable tool and evidence snapshots,
 - report-history and report-reopen APIs scoped by company,
-- UI actions for inspecting raw evidence, generating an answer, or reopening saved research.
+- guarded atomic-claim extraction with typed claims and citation allowlist validation,
+- persisted, ordered claims that are idempotently reused after extraction,
+- UI actions for inspecting evidence, generating or reopening research, and extracting claims.
 
 ## Deliberately Deferred
 
@@ -1450,7 +1456,7 @@ The following work is valuable, but was skipped so the prototype could validate 
 retrieval, and grounded-generation flow first:
 
 - multi-turn conversation history,
-- atomic claim extraction and claim-to-source storage,
+- relational `claim_sources` records and independent source-entailment results,
 - independent numeric, citation, grounding, temporal, and contradiction verification,
 - claim-level and report-level reliability scores,
 - automated citation-entailment checks,
@@ -1532,6 +1538,17 @@ Agent execution uses temperature-zero generation, a bounded tool-call loop, vali
 compact model-facing excerpts, and fixed evidence limits. These controls reduce uncontrolled
 behavior, latency, token usage, and the opportunity for irrelevant context to influence the answer.
 
+### Guarded Atomic Claim Extraction
+
+Claim extraction operates only on the immutable saved answer and its known evidence IDs. It uses a
+strict JSON schema, a six-value claim-type enum, a 30-claim limit, duplicate removal, stable claim
+ordering, and an evidence-ID allowlist. Unknown citations cause extraction to fail instead of being
+stored. Existing claims are returned idempotently, avoiding repeated model calls unless a future
+explicit re-extraction is requested.
+
+Extraction separates assertions for later verification; it does not itself prove that a claim is
+correct or that its citations entail it.
+
 ## Guardrails Still Needed for Production
 
 The current prototype does not yet independently verify whether each citation actually entails the
@@ -1540,7 +1557,7 @@ periods, or attach a valid source to an unsupported sentence.
 
 The production verification layer should therefore:
 
-1. Decompose every answer into atomic claims.
+1. Use the persisted atomic claims as independent verification units.
 2. Recalculate every numeric claim from stored structured facts.
 3. Check that cited passages semantically entail qualitative claims.
 4. Reject citations that are missing, invalid, or unrelated.

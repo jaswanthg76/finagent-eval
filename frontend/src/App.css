@@ -197,6 +197,24 @@ h1 {
   font-size: 9px;
 }
 
+.research-answer-actions {
+  display: flex;
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.research-answer-actions > span {
+  color: var(--muted-light);
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+.research-answer-actions button {
+  width: auto;
+  padding: 8px 11px;
+}
+
 .research-answer-copy {
   margin: 22px 0;
   color: #344139;
@@ -251,6 +269,89 @@ h1 {
 
 .research-sources a:hover {
   color: var(--green);
+}
+
+.claim-feedback {
+  margin-top: 18px;
+}
+
+.claim-results {
+  margin-top: 22px;
+  padding-top: 19px;
+  border-top: 1px solid var(--border);
+}
+
+.claim-results-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 11px;
+}
+
+.claim-results-heading > strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.claim-results-heading > span {
+  color: var(--muted-light);
+  font-size: 10px;
+}
+
+.claim-list {
+  display: grid;
+  gap: 7px;
+}
+
+.claim-card {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.claim-index {
+  display: grid;
+  place-items: center;
+  border-right: 1px solid var(--border);
+  color: var(--muted-light);
+  background: #fafbf8;
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+.claim-card > div {
+  padding: 12px 14px;
+}
+
+.claim-type {
+  color: var(--green);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.claim-card p {
+  margin: 6px 0 8px;
+  color: #344139;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.claim-citations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.claim-citations span {
+  color: var(--muted-light);
+  font-family: var(--mono);
+  font-size: 9px;
 }
 
 .saved-research {
@@ -972,6 +1073,22 @@ h2 {
     align-items: flex-start;
     flex-direction: column;
     gap: 6px;
+  }
+
+  .research-answer-header,
+  .research-answer-actions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .research-answer-actions button {
+    width: 100%;
+  }
+
+  .claim-results-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
   }
 
   .saved-report-card {
