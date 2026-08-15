@@ -5,6 +5,8 @@ description = "AI reliability infrastructure for financial research"
 readme = { text = "AI reliability infrastructure for financial research.", content-type = "text/markdown" }
 requires-python = ">=3.11"
 dependencies = [
+    "alembic>=1.14.0",
+    "beautifulsoup4>=4.12.0",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "pydantic>=2.10.0",

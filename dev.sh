@@ -40,6 +40,7 @@ trap cleanup INT TERM EXIT
 echo "Starting backend at http://localhost:8000"
 (
   cd "$ROOT_DIR/backend"
+  uv run alembic upgrade head
   exec uv run uvicorn app.main:app --reload
 ) &
 BACKEND_PID=$!

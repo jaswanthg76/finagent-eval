@@ -1103,10 +1103,12 @@ Keep the API small.
 GET  /api/companies
 GET  /api/companies/{ticker}
 
-POST /api/companies/{ticker}/ingest
-
 GET  /api/companies/{ticker}/filings
+POST /api/companies/{ticker}/filings/sync
 GET  /api/companies/{ticker}/metrics
+
+POST /api/filings/{filing_id}/ingest
+GET  /api/filings/{filing_id}/sections
 
 POST /api/research
 GET  /api/research/{report_id}
@@ -1296,6 +1298,24 @@ redis
 Use Docker Compose for PostgreSQL and Redis.
 
 The frontend and FastAPI application may run directly during development for faster reload cycles.
+
+Start PostgreSQL and Redis, then launch both application servers:
+
+```bash
+docker compose up -d
+./dev.sh
+```
+
+The development script applies pending Alembic migrations before starting FastAPI. The frontend is
+available at `http://localhost:5173`, the API at `http://localhost:8000`, and interactive API docs at
+`http://localhost:8000/docs`.
+
+To apply migrations manually:
+
+```bash
+cd backend
+uv run alembic upgrade head
+```
 
 ---
 
