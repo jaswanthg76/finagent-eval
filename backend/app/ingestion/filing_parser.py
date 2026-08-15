@@ -1,8 +1,10 @@
 import re
 from dataclasses import dataclass
+from functools import cache
 from itertools import pairwise
 from typing import Protocol
 
+import tiktoken
 from bs4 import BeautifulSoup, NavigableString
 
 
@@ -49,7 +51,6 @@ FILING_HEADING_PATTERN = re.compile(
     r"item\s+(?P<item>\d{1,2}[a-z]?)\b\s*[.\-:]?\s*[^\n]{0,160}"
     r")$"
 )
-TOKEN_PATTERN = re.compile(r"\w+|[^\w\s]", re.UNICODE)
 SENTENCE_BOUNDARY_PATTERN = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9(\[])")
 SECTION_MAP = {
     "10-K": (
@@ -125,14 +126,18 @@ def parse_filing_html(html: str, form: str) -> list[ParsedSection]:
     return extract_sections(html_to_text(html), form)
 
 
-def count_tokens(text: str) -> int:
-    """Estimate tokens until a model tokenizer is configured.
+@cache
+def _tokenizer(model: str) -> tiktoken.Encoding:
+    try:
+        return tiktoken.encoding_for_model(model)
+    except KeyError:
+        return tiktoken.get_encoding("cl100k_base")
 
-    The chunker accepts any ``TokenCounter``. An embedding provider can therefore
-    inject its exact tokenizer without coupling filing parsing to that provider.
-    """
 
-    return len(TOKEN_PATTERN.findall(text))
+def count_tokens(text: str, model: str = "text-embedding-3-small") -> int:
+    """Count tokens with the selected embedding model's tokenizer."""
+
+    return len(_tokenizer(model).encode(text, disallowed_special=()))
 
 
 def _split_oversized_text(
