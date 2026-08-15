@@ -168,6 +168,26 @@ type ClaimExtractionResult = {
   claims: ResearchClaim[]
 }
 
+type ClaimEvaluation = {
+  id: number
+  claim_id: number
+  evaluation_type: 'NUMERIC'
+  status: 'VERIFIED' | 'PARTIALLY_SUPPORTED' | 'UNSUPPORTED' | 'CONTRADICTED' | 'ERROR'
+  confidence: number
+  reason: string
+  claimed_values: Array<Record<string, unknown>>
+  calculated_values: Array<Record<string, unknown>>
+  verifier_version: string
+  created_at: string
+}
+
+type NumericVerificationResult = {
+  report_id: number
+  eligible_claims: number
+  verified_claims: number
+  evaluations: ClaimEvaluation[]
+}
+
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
 async function responseError(response: Response): Promise<string> {
@@ -237,6 +257,9 @@ function App() {
   const [researchClaims, setResearchClaims] = useState<ResearchClaim[]>([])
   const [claimsError, setClaimsError] = useState<string | null>(null)
   const [isExtractingClaims, setIsExtractingClaims] = useState(false)
+  const [claimEvaluations, setClaimEvaluations] = useState<ClaimEvaluation[]>([])
+  const [isVerifyingNumeric, setIsVerifyingNumeric] = useState(false)
+  const [numericVerificationMessage, setNumericVerificationMessage] = useState<string | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -280,6 +303,8 @@ function App() {
     setResearchAnswer(null)
     setResearchClaims([])
     setClaimsError(null)
+    setClaimEvaluations([])
+    setNumericVerificationMessage(null)
     setSavedReports([])
     setReportsError(null)
     setIsReportsLoading(true)
@@ -526,6 +551,8 @@ function App() {
     setResearchAnswer(null)
     setResearchClaims([])
     setClaimsError(null)
+    setClaimEvaluations([])
+    setNumericVerificationMessage(null)
     setSearchError(null)
     setHasSearched(true)
     try {
@@ -566,6 +593,8 @@ function App() {
     setResearchAnswer(null)
     setResearchClaims([])
     setClaimsError(null)
+    setClaimEvaluations([])
+    setNumericVerificationMessage(null)
     try {
       const response = await fetch(`${API_URL}/api/research`, {
         method: 'POST',
@@ -613,15 +642,19 @@ function App() {
     setSearchError(null)
     setClaimsError(null)
     try {
-      const [reportResponse, claimsResponse] = await Promise.all([
+      const [reportResponse, claimsResponse, evaluationsResponse] = await Promise.all([
         fetch(`${API_URL}/api/research/reports/${reportId}`),
         fetch(`${API_URL}/api/research/reports/${reportId}/claims`),
+        fetch(`${API_URL}/api/research/reports/${reportId}/evaluations`),
       ])
       if (!reportResponse.ok) throw new Error(await responseError(reportResponse))
       if (!claimsResponse.ok) throw new Error(await responseError(claimsResponse))
+      if (!evaluationsResponse.ok) throw new Error(await responseError(evaluationsResponse))
       const result = (await reportResponse.json()) as ResearchAnswer
       setResearchAnswer(result)
       setResearchClaims((await claimsResponse.json()) as ResearchClaim[])
+      setClaimEvaluations((await evaluationsResponse.json()) as ClaimEvaluation[])
+      setNumericVerificationMessage(null)
       setSearchQuery(result.question)
       setSearchForm(result.form ?? '')
       setSearchAsOfDate(result.as_of_date ?? '')
@@ -649,10 +682,38 @@ function App() {
       if (!response.ok) throw new Error(await responseError(response))
       const result = (await response.json()) as ClaimExtractionResult
       setResearchClaims(result.claims)
+      setClaimEvaluations([])
+      setNumericVerificationMessage(null)
     } catch (requestError) {
       if (requestError instanceof Error) setClaimsError(requestError.message)
     } finally {
       setIsExtractingClaims(false)
+    }
+  }
+
+  async function verifyNumericClaims() {
+    if (!researchAnswer) return
+
+    setIsVerifyingNumeric(true)
+    setClaimsError(null)
+    setNumericVerificationMessage(null)
+    try {
+      const response = await fetch(
+        `${API_URL}/api/research/reports/${researchAnswer.id}/verify-numeric`,
+        { method: 'POST' },
+      )
+      if (!response.ok) throw new Error(await responseError(response))
+      const result = (await response.json()) as NumericVerificationResult
+      setClaimEvaluations(result.evaluations)
+      setNumericVerificationMessage(
+        result.eligible_claims === 0
+          ? 'No explicit numeric or comparative claims were available to verify.'
+          : `${result.verified_claims} of ${result.eligible_claims} numeric claims verified.`,
+      )
+    } catch (requestError) {
+      if (requestError instanceof Error) setClaimsError(requestError.message)
+    } finally {
+      setIsVerifyingNumeric(false)
     }
   }
 
@@ -872,30 +933,60 @@ function App() {
               {researchClaims.length > 0 && (
                 <section className="claim-results" aria-labelledby="claim-results-heading">
                   <div className="claim-results-heading">
-                    <strong id="claim-results-heading">Atomic claims</strong>
-                    <span>Ready for independent verification</span>
+                    <div>
+                      <strong id="claim-results-heading">Atomic claims</strong>
+                      <span>Deterministic checks use cited metric facts only</span>
+                    </div>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={verifyNumericClaims}
+                      disabled={isVerifyingNumeric || claimEvaluations.length > 0}
+                    >
+                      {isVerifyingNumeric
+                        ? 'Verifying numbers…'
+                        : claimEvaluations.length > 0
+                          ? `${claimEvaluations.length} numeric checks`
+                          : 'Verify numeric claims'}
+                    </button>
                   </div>
+                  {numericVerificationMessage && (
+                    <p className="numeric-verification-message">{numericVerificationMessage}</p>
+                  )}
                   <div className="claim-list">
-                    {researchClaims.map((claim) => (
-                      <article className="claim-card" key={claim.id}>
-                        <span className="claim-index">
-                          {String(claim.claim_index).padStart(2, '0')}
-                        </span>
-                        <div>
-                          <span className="claim-type">
-                            {claim.claim_type.replaceAll('_', ' ')}
+                    {researchClaims.map((claim) => {
+                      const evaluation = claimEvaluations.find(
+                        (item) => item.claim_id === claim.id,
+                      )
+                      return (
+                        <article className="claim-card" key={claim.id}>
+                          <span className="claim-index">
+                            {String(claim.claim_index).padStart(2, '0')}
                           </span>
-                          <p>{claim.claim_text}</p>
-                          <div className="claim-citations">
-                            {claim.citation_ids.length > 0
-                              ? claim.citation_ids.map((citationId) => (
-                                  <span key={citationId}>[{citationId}]</span>
-                                ))
-                              : <span>Uncited</span>}
+                          <div>
+                            <span className="claim-type">
+                              {claim.claim_type.replaceAll('_', ' ')}
+                            </span>
+                            <p>{claim.claim_text}</p>
+                            <div className="claim-citations">
+                              {claim.citation_ids.length > 0
+                                ? claim.citation_ids.map((citationId) => (
+                                    <span key={citationId}>[{citationId}]</span>
+                                  ))
+                                : <span>Uncited</span>}
+                            </div>
+                            {evaluation && (
+                              <div className="claim-evaluation">
+                                <span className={`evaluation-status ${evaluation.status.toLowerCase()}`}>
+                                  {evaluation.status.replaceAll('_', ' ')}
+                                </span>
+                                <p>{evaluation.reason}</p>
+                              </div>
+                            )}
                           </div>
-                        </div>
-                      </article>
-                    ))}
+                        </article>
+                      )
+                    })}
                   </div>
                 </section>
               )}

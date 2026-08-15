@@ -9,6 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.retrieval import _semantic_search_for_company
 from app.core.config import settings
 from app.core.database import get_db
+from app.evaluation.numeric import (
+    NUMERIC_VERIFIER_VERSION,
+    is_numeric_claim,
+    verify_numeric_claim,
+)
+from app.models.claim_evaluation import ClaimEvaluation
 from app.models.company import Company
 from app.models.filing import Filing
 from app.models.financial_metric import FinancialMetric
@@ -27,7 +33,9 @@ from app.research.claims import (
 )
 from app.research.hybrid import identify_metric_names
 from app.schemas.research import (
+    ClaimEvaluationRead,
     ClaimExtractionResult,
+    NumericVerificationResult,
     ResearchAnswer,
     ResearchClaimRead,
     ResearchReportRead,
@@ -68,6 +76,21 @@ def _claim_read(claim: ResearchClaim) -> ResearchClaimRead:
         claim_type=claim.claim_type,
         citation_ids=claim.citation_ids,
         created_at=claim.created_at,
+    )
+
+
+def _evaluation_read(evaluation: ClaimEvaluation) -> ClaimEvaluationRead:
+    return ClaimEvaluationRead(
+        id=evaluation.id,
+        claim_id=evaluation.claim_id,
+        evaluation_type="NUMERIC",
+        status=evaluation.status,
+        confidence=float(evaluation.confidence),
+        reason=evaluation.reason,
+        claimed_values=evaluation.claimed_values,
+        calculated_values=evaluation.calculated_values,
+        verifier_version=evaluation.verifier_version,
+        created_at=evaluation.created_at,
     )
 
 
@@ -480,4 +503,102 @@ async def extract_research_claims(
         extracted=len(claims),
         model=settings.ai_model,
         claims=[_claim_read(claim) for claim in claims],
+    )
+
+
+@router.get(
+    "/reports/{report_id}/evaluations",
+    response_model=list[ClaimEvaluationRead],
+)
+async def list_claim_evaluations(
+    report_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[ClaimEvaluationRead]:
+    if await db.scalar(select(ResearchReport.id).where(ResearchReport.id == report_id)) is None:
+        raise HTTPException(status_code=404, detail=f"Research report {report_id} was not found")
+    result = await db.execute(
+        select(ClaimEvaluation)
+        .join(ResearchClaim, ResearchClaim.id == ClaimEvaluation.claim_id)
+        .where(ResearchClaim.report_id == report_id)
+        .order_by(ResearchClaim.claim_index)
+    )
+    return [_evaluation_read(evaluation) for evaluation in result.scalars().all()]
+
+
+@router.post(
+    "/reports/{report_id}/verify-numeric",
+    response_model=NumericVerificationResult,
+)
+async def verify_report_numeric_claims(
+    report_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    force: bool = False,
+) -> NumericVerificationResult:
+    report = await db.scalar(select(ResearchReport).where(ResearchReport.id == report_id))
+    if report is None:
+        raise HTTPException(status_code=404, detail=f"Research report {report_id} was not found")
+    claims_result = await db.execute(
+        select(ResearchClaim)
+        .where(ResearchClaim.report_id == report_id)
+        .order_by(ResearchClaim.claim_index)
+    )
+    claims = list(claims_result.scalars().all())
+    eligible = [
+        claim for claim in claims if is_numeric_claim(claim.claim_type, claim.claim_text)
+    ]
+    if not eligible:
+        return NumericVerificationResult(
+            report_id=report_id,
+            eligible_claims=0,
+            verified_claims=0,
+            evaluations=[],
+        )
+
+    eligible_ids = [claim.id for claim in eligible]
+    existing_result = await db.execute(
+        select(ClaimEvaluation).where(ClaimEvaluation.claim_id.in_(eligible_ids))
+    )
+    existing = list(existing_result.scalars().all())
+    if len(existing) == len(eligible) and not force:
+        ordered = sorted(existing, key=lambda evaluation: eligible_ids.index(evaluation.claim_id))
+        return NumericVerificationResult(
+            report_id=report_id,
+            eligible_claims=len(eligible),
+            verified_claims=sum(item.status == "VERIFIED" for item in ordered),
+            evaluations=[_evaluation_read(item) for item in ordered],
+        )
+
+    metrics_by_evidence_id = {
+        f"M{index}": metric for index, metric in enumerate(report.metrics, start=1)
+    }
+    if existing:
+        await db.execute(delete(ClaimEvaluation).where(ClaimEvaluation.claim_id.in_(eligible_ids)))
+    evaluations: list[ClaimEvaluation] = []
+    for claim in eligible:
+        outcome = verify_numeric_claim(
+            claim_text=claim.claim_text,
+            citation_ids=claim.citation_ids,
+            metrics_by_evidence_id=metrics_by_evidence_id,
+        )
+        evaluations.append(
+            ClaimEvaluation(
+                claim_id=claim.id,
+                evaluation_type="NUMERIC",
+                status=outcome.status,
+                confidence=outcome.confidence,
+                reason=outcome.reason,
+                claimed_values=outcome.claimed_values,
+                calculated_values=outcome.calculated_values,
+                verifier_version=NUMERIC_VERIFIER_VERSION,
+            )
+        )
+    db.add_all(evaluations)
+    await db.commit()
+    for evaluation in evaluations:
+        await db.refresh(evaluation)
+    return NumericVerificationResult(
+        report_id=report_id,
+        eligible_claims=len(eligible),
+        verified_claims=sum(item.status == "VERIFIED" for item in evaluations),
+        evaluations=[_evaluation_read(item) for item in evaluations],
     )

@@ -643,9 +643,13 @@ This table links claims back to evidence.
 ```text
 id
 claim_id
+evaluation_type
 status
 confidence
 reason
+claimed_values
+calculated_values
+verifier_version
 created_at
 ```
 
@@ -1116,8 +1120,10 @@ GET  /api/research/reports
 GET  /api/research/reports/{report_id}
 POST /api/research/reports/{report_id}/claims/extract
 GET  /api/research/reports/{report_id}/claims
+POST /api/research/reports/{report_id}/verify-numeric
+GET  /api/research/reports/{report_id}/evaluations
 
-Planned evaluation endpoints:
+Planned report-level evaluation endpoints:
 
 POST /api/research/reports/{report_id}/evaluate
 GET  /api/research/reports/{report_id}/evaluation
@@ -1443,12 +1449,16 @@ It currently supports:
 - a Groq-hosted research agent with controlled retrieval tools,
 - exact `ticker`, filing-form, and `as_of_date` filtering,
 - deterministic comparable-period selection and financial calculations,
+- compact two-fact metric preloads for comparable-period questions on free-tier model limits,
 - cited answers that retain links to the underlying SEC filings,
 - persistent research reports with immutable tool and evidence snapshots,
 - report-history and report-reopen APIs scoped by company,
 - guarded atomic-claim extraction with typed claims and citation allowlist validation,
 - persisted, ordered claims that are idempotently reused after extraction,
-- UI actions for inspecting evidence, generating or reopening research, and extracting claims.
+- deterministic numeric-claim verification against cited structured metric evidence,
+- persisted numeric evaluations with claimed values, calculated values, reasons, and verifier versions,
+- UI actions for inspecting evidence, generating or reopening research, extracting claims, and
+  verifying numeric claims.
 
 ## Deliberately Deferred
 
@@ -1457,7 +1467,7 @@ retrieval, and grounded-generation flow first:
 
 - multi-turn conversation history,
 - relational `claim_sources` records and independent source-entailment results,
-- independent numeric, citation, grounding, temporal, and contradiction verification,
+- independent citation, grounding, temporal, and contradiction verification,
 - claim-level and report-level reliability scores,
 - automated citation-entailment checks,
 - human review and approval workflows,
@@ -1470,8 +1480,10 @@ retrieval, and grounded-generation flow first:
 - production deployment hardening, backups, retention policies, and disaster recovery,
 - licensed transcripts, market data, news, investor presentations, and other non-SEC sources.
 
-Until the independent verification pipeline is implemented, generated answers should be treated as
-assisted research. Users should open the attached SEC evidence before relying on a material claim.
+Numeric verification now covers explicit percentages and scaled or currency amounts when a claim
+cites structured metric evidence. Generated answers should still be treated as assisted research:
+users should open the attached SEC evidence before relying on a material claim, especially for
+qualitative claims that have not yet undergone independent entailment verification.
 
 ---
 
@@ -1549,6 +1561,18 @@ explicit re-extraction is requested.
 Extraction separates assertions for later verification; it does not itself prove that a claim is
 correct or that its citations entail it.
 
+### Deterministic Numeric Claim Verification
+
+Eligible atomic claims are independently parsed for explicit percentages and scaled or currency
+amounts. The verifier reads only the claim's cited `[M#]` facts from the immutable report snapshot,
+recalculates absolute and percentage changes in backend code, and compares the claimed values with
+small documented tolerances. It does not use an LLM for arithmetic.
+
+Each result is persisted idempotently as `VERIFIED`, `PARTIALLY_SUPPORTED`, `UNSUPPORTED`,
+`CONTRADICTED`, or `ERROR`, along with the parsed values, calculated candidates, reason, confidence,
+and verifier version. The UI displays these results beside their claims. A valid numeric result does
+not prove that a qualitative citation entails the surrounding claim.
+
 ## Guardrails Still Needed for Production
 
 The current prototype does not yet independently verify whether each citation actually entails the
@@ -1558,12 +1582,12 @@ periods, or attach a valid source to an unsupported sentence.
 The production verification layer should therefore:
 
 1. Use the persisted atomic claims as independent verification units.
-2. Recalculate every numeric claim from stored structured facts.
+2. Expand numeric parsing to ratios, per-share values, ranges, and unusual units.
 3. Check that cited passages semantically entail qualitative claims.
 4. Reject citations that are missing, invalid, or unrelated.
 5. Reapply temporal constraints independently of generation.
 6. Detect contradictions within the answer and across filings.
-7. Assign claim-level statuses and an overall reliability score.
+7. Assign an overall reliability score from the independent claim checks.
 8. Require human review for high-impact or low-confidence outputs.
 
 The goal is not to claim that the LLM cannot hallucinate. The goal is to constrain what it can see,

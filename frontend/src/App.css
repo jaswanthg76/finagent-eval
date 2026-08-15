@@ -289,14 +289,29 @@ h1 {
   margin-bottom: 11px;
 }
 
-.claim-results-heading > strong {
+.claim-results-heading > div {
+  display: grid;
+  gap: 4px;
+}
+
+.claim-results-heading > div > strong {
   color: var(--ink);
   font-size: 12px;
 }
 
-.claim-results-heading > span {
+.claim-results-heading > div > span {
   color: var(--muted-light);
   font-size: 10px;
+}
+
+.claim-results-heading button {
+  width: auto;
+}
+
+.numeric-verification-message {
+  margin: 0 0 11px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .claim-list {
@@ -352,6 +367,53 @@ h1 {
   color: var(--muted-light);
   font-family: var(--mono);
   font-size: 9px;
+}
+
+.claim-evaluation {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.claim-evaluation p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.evaluation-status {
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  background: #fafbf8;
+  font-family: var(--mono);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.evaluation-status.verified {
+  border-color: #b9ddc7;
+  color: #1f6e41;
+  background: #f1faf4;
+}
+
+.evaluation-status.partially_supported {
+  border-color: #ead59e;
+  color: #7b5a0b;
+  background: #fffaf0;
+}
+
+.evaluation-status.contradicted {
+  border-color: #efd7d3;
+  color: #8f2d2d;
+  background: #fff8f7;
 }
 
 .saved-research {
@@ -1089,6 +1151,15 @@ h2 {
     align-items: flex-start;
     flex-direction: column;
     gap: 4px;
+  }
+
+  .claim-results-heading button {
+    width: 100%;
+  }
+
+  .claim-evaluation {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .saved-report-card {

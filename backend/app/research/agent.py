@@ -158,7 +158,7 @@ class GroqResearchAgent:
         if required_metric_names:
             preload_arguments: dict[str, object] = {
                 "metric_names": required_metric_names,
-                "limit_per_metric": 3,
+                "limit_per_metric": 2,
             }
             preloaded_metrics = await execute_tool(
                 "get_financial_metrics",

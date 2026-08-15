@@ -1,6 +1,7 @@
 """SQLAlchemy models."""
 
 from app.models.base import Base
+from app.models.claim_evaluation import ClaimEvaluation
 from app.models.company import Company
 from app.models.filing import Filing
 from app.models.filing_chunk import FilingChunk
@@ -11,6 +12,7 @@ from app.models.research_report import ResearchReport
 
 __all__ = [
     "Base",
+    "ClaimEvaluation",
     "Company",
     "Filing",
     "FilingChunk",

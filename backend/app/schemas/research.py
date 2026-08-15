@@ -89,3 +89,32 @@ class ClaimExtractionResult(BaseModel):
     extracted: int
     model: str
     claims: list[ResearchClaimRead]
+
+
+EvaluationStatus = Literal[
+    "VERIFIED",
+    "PARTIALLY_SUPPORTED",
+    "UNSUPPORTED",
+    "CONTRADICTED",
+    "ERROR",
+]
+
+
+class ClaimEvaluationRead(BaseModel):
+    id: int
+    claim_id: int
+    evaluation_type: Literal["NUMERIC"]
+    status: EvaluationStatus
+    confidence: float
+    reason: str
+    claimed_values: list[dict[str, object]]
+    calculated_values: list[dict[str, object]]
+    verifier_version: str
+    created_at: datetime
+
+
+class NumericVerificationResult(BaseModel):
+    report_id: int
+    eligible_claims: int
+    verified_claims: int
+    evaluations: list[ClaimEvaluationRead]

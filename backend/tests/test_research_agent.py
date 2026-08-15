@@ -100,6 +100,6 @@ async def test_groq_agent_preloads_explicit_metrics_before_model_call() -> None:
     assert calls[0]["name"] == "get_financial_metrics"
     execute_tool.assert_awaited_once_with(
         "get_financial_metrics",
-        {"metric_names": ["Revenue"], "limit_per_metric": 3},
+        {"metric_names": ["Revenue"], "limit_per_metric": 2},
     )
     assert create.await_args.kwargs["tool_choice"] == "auto"
