@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -12,14 +12,19 @@ class Settings(BaseSettings):
     frontend_url: str = "http://localhost:5173"
     sec_user_agent: str = "FinAgentEval/0.1"
     openai_api_key: SecretStr | None = None
-    embedding_model: str = "text-embedding-3-small"
+    embedding_provider: Literal["local", "openai"] = "local"
+    embedding_model: str = "jinaai/jina-embeddings-v2-small-en"
     embedding_dimensions: int = 512
     embedding_batch_size: int = 32
 
     @field_validator("embedding_model", mode="before")
     @classmethod
     def default_embedding_model(cls, value: Any) -> str:
-        return str(value).strip() if value and str(value).strip() else "text-embedding-3-small"
+        return (
+            str(value).strip()
+            if value and str(value).strip()
+            else "jinaai/jina-embeddings-v2-small-en"
+        )
 
     @field_validator("openai_api_key", mode="before")
     @classmethod

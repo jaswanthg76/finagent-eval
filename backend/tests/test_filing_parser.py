@@ -1,6 +1,12 @@
+from functools import partial
+
 import pytest
 
 from app.ingestion.filing_parser import chunk_text, count_tokens, parse_filing_html
+
+openai_token_counter = partial(
+    count_tokens, model="text-embedding-3-small", provider="openai"
+)
 
 
 def test_parse_filing_html_extracts_named_10k_sections() -> None:
@@ -108,17 +114,21 @@ def test_chunk_text_creates_sentence_aligned_bounded_chunks() -> None:
     sentences = [f"Revenue sentence {index} contains useful context." for index in range(40)]
     text = " ".join(sentences)
 
-    chunks = chunk_text(text, max_tokens=50, overlap_tokens=10)
+    chunks = chunk_text(
+        text, max_tokens=50, overlap_tokens=10, token_counter=openai_token_counter
+    )
 
     assert len(chunks) > 1
-    assert all(count_tokens(chunk) <= 50 for chunk in chunks)
+    assert all(openai_token_counter(chunk) <= 50 for chunk in chunks)
     assert all(chunk.endswith(".") for chunk in chunks)
 
 
 def test_chunk_text_preserves_paragraph_boundaries() -> None:
     text = "First sentence. Second sentence.\n\nA separate paragraph starts here."
 
-    chunks = chunk_text(text, max_tokens=100, overlap_tokens=10)
+    chunks = chunk_text(
+        text, max_tokens=100, overlap_tokens=10, token_counter=openai_token_counter
+    )
 
     assert chunks == [
         "First sentence. Second sentence.\n\nA separate paragraph starts here."
@@ -128,7 +138,9 @@ def test_chunk_text_preserves_paragraph_boundaries() -> None:
 def test_chunk_text_repeats_complete_sentences_as_overlap() -> None:
     text = "First has four words. Second has four words. Third has four words."
 
-    chunks = chunk_text(text, max_tokens=10, overlap_tokens=5)
+    chunks = chunk_text(
+        text, max_tokens=10, overlap_tokens=5, token_counter=openai_token_counter
+    )
 
     assert chunks == [
         "First has four words. Second has four words.",

@@ -14,8 +14,9 @@ from app.models.filing_chunk import FilingChunk
 from app.models.filing_section import FilingSection
 from app.retrieval.embeddings import (
     EmbeddingConfigurationError,
-    OpenAIEmbeddingClient,
+    EmbeddingGenerationError,
     content_hash,
+    create_embedding_client,
 )
 from app.schemas.retrieval import ChunkEmbeddingSyncResult, SemanticSearchResult
 
@@ -35,7 +36,9 @@ def _raise_embedding_error(error: Exception) -> NoReturn:
         raise HTTPException(status_code=503, detail=str(error)) from error
     if isinstance(error, RateLimitError):
         raise HTTPException(status_code=429, detail="OpenAI embedding rate limit exceeded") from error
-    raise HTTPException(status_code=502, detail="OpenAI embedding request failed") from error
+    if isinstance(error, EmbeddingGenerationError):
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    raise HTTPException(status_code=502, detail="Embedding request failed") from error
 
 
 @router.post("/embeddings/sync", response_model=ChunkEmbeddingSyncResult)
@@ -66,7 +69,7 @@ async def sync_chunk_embeddings(
 
     if selected:
         try:
-            client = OpenAIEmbeddingClient()
+            client = create_embedding_client()
             for start in range(0, len(selected), settings.embedding_batch_size):
                 batch = selected[start : start + settings.embedding_batch_size]
                 vectors = await client.embed_texts([chunk.content for chunk in batch])
@@ -77,7 +80,7 @@ async def sync_chunk_embeddings(
                     chunk.embedding_content_hash = content_hash(chunk.content)
                     chunk.embedded_at = embedded_at
             await db.commit()
-        except (EmbeddingConfigurationError, APIError) as error:
+        except (EmbeddingConfigurationError, EmbeddingGenerationError, APIError) as error:
             await db.rollback()
             _raise_embedding_error(error)
 
@@ -121,8 +124,8 @@ async def semantic_search(
         )
 
     try:
-        query_vector = (await OpenAIEmbeddingClient().embed_texts([query]))[0]
-    except (EmbeddingConfigurationError, APIError) as error:
+        query_vector = (await create_embedding_client().embed_texts([query]))[0]
+    except (EmbeddingConfigurationError, EmbeddingGenerationError, APIError) as error:
         _raise_embedding_error(error)
 
     distance = FilingChunk.embedding.cosine_distance(query_vector).label("distance")

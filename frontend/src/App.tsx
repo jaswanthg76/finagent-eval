@@ -52,6 +52,24 @@ type BulkIngestProgress = {
   failed: number
 }
 
+type ChunkEmbeddingSyncResult = {
+  ticker: string
+  total_chunks: number
+  eligible: number
+  embedded: number
+  skipped: number
+  remaining: number
+  model: string
+  dimensions: number
+}
+
+type EmbeddingProgress = {
+  completed: number
+  total: number
+  remaining: number
+  model: string | null
+}
+
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
 async function responseError(response: Response): Promise<string> {
@@ -74,8 +92,10 @@ function App() {
   const [isFilingsLoading, setIsFilingsLoading] = useState(false)
   const [isSyncing, setIsSyncing] = useState(false)
   const [isReingestingAll, setIsReingestingAll] = useState(false)
+  const [isEmbeddingSyncing, setIsEmbeddingSyncing] = useState(false)
   const [ingestingFilingId, setIngestingFilingId] = useState<number | null>(null)
   const [bulkProgress, setBulkProgress] = useState<BulkIngestProgress | null>(null)
+  const [embeddingProgress, setEmbeddingProgress] = useState<EmbeddingProgress | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -275,6 +295,53 @@ function App() {
     }
   }
 
+  async function generateEmbeddings() {
+    if (!selectedCompany) return
+
+    setIsEmbeddingSyncing(true)
+    setEmbeddingProgress({ completed: 0, total: 0, remaining: 0, model: null })
+    setFilingsError(null)
+    setSyncMessage(null)
+    let completed = 0
+
+    try {
+      let result: ChunkEmbeddingSyncResult
+      do {
+        const response = await fetch(
+          `${API_URL}/api/companies/${selectedCompany.ticker}/embeddings/sync?limit=500`,
+          { method: 'POST' },
+        )
+        if (!response.ok) throw new Error(await responseError(response))
+        result = (await response.json()) as ChunkEmbeddingSyncResult
+        completed += result.embedded
+        const total = completed + result.remaining
+        setEmbeddingProgress({
+          completed,
+          total,
+          remaining: result.remaining,
+          model: result.model,
+        })
+
+        if (result.remaining > 0 && result.embedded === 0) {
+          throw new Error('Embedding generation made no progress. Please try again.')
+        }
+      } while (result.remaining > 0)
+
+      setSyncMessage(
+        completed > 0
+          ? `Generated ${completed} embeddings. All ${result.total_chunks} ${selectedCompany.ticker} chunks are ready.`
+          : result.total_chunks > 0
+            ? `All ${result.total_chunks} ${selectedCompany.ticker} chunks are already embedded.`
+            : `No ingested ${selectedCompany.ticker} chunks are available to embed.`,
+      )
+    } catch (requestError) {
+      if (requestError instanceof Error) setFilingsError(requestError.message)
+    } finally {
+      setIsEmbeddingSyncing(false)
+      setEmbeddingProgress(null)
+    }
+  }
+
   return (
     <main>
       <header className="site-header">
@@ -325,6 +392,7 @@ function App() {
                   bulkProgress !== null ||
                   isSyncing ||
                   isReingestingAll ||
+                  isEmbeddingSyncing ||
                   ingestingFilingId !== null
                 }
               >
@@ -357,6 +425,7 @@ function App() {
                   bulkProgress !== null ||
                   isSyncing ||
                   isReingestingAll ||
+                  isEmbeddingSyncing ||
                   ingestingFilingId !== null ||
                   filings.length === 0
                 }
@@ -373,11 +442,29 @@ function App() {
                   isReingestingAll ||
                   bulkProgress !== null ||
                   isSyncing ||
+                  isEmbeddingSyncing ||
                   ingestingFilingId !== null
                 }
                 title="Regenerate sections and chunks for every stored filing"
               >
                 {isReingestingAll ? 'Re-ingesting all…' : 'Re-ingest all'}
+              </button>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={generateEmbeddings}
+                disabled={
+                  isEmbeddingSyncing ||
+                  isSyncing ||
+                  isReingestingAll ||
+                  bulkProgress !== null ||
+                  ingestingFilingId !== null ||
+                  isFilingsLoading ||
+                  !filings.some((filing) => filing.ingested_at !== null)
+                }
+                title="Generate local semantic-search vectors for this company's chunks"
+              >
+                {isEmbeddingSyncing ? 'Generating embeddings…' : 'Generate embeddings'}
               </button>
               <button
                 className="sync-button"
@@ -386,6 +473,7 @@ function App() {
                 disabled={
                   isSyncing ||
                   isReingestingAll ||
+                  isEmbeddingSyncing ||
                   bulkProgress !== null ||
                   ingestingFilingId !== null
                 }
@@ -412,6 +500,24 @@ function App() {
                 <span>Regenerating sections and token-based chunks…</span>
               </div>
               <progress />
+            </div>
+          )}
+          {isEmbeddingSyncing && embeddingProgress && (
+            <div className="bulk-progress" role="status">
+              <div>
+                <strong>Generating local embeddings</strong>
+                <span>
+                  {embeddingProgress.total > 0
+                    ? `${embeddingProgress.completed} of ${embeddingProgress.total} complete`
+                    : 'Preparing the local model…'}
+                </span>
+              </div>
+              {embeddingProgress.total > 0 ? (
+                <progress value={embeddingProgress.completed} max={embeddingProgress.total} />
+              ) : (
+                <progress />
+              )}
+              {embeddingProgress.model && <small>{embeddingProgress.remaining} remaining</small>}
             </div>
           )}
           {syncMessage && <p className="success" role="status">{syncMessage}</p>}
@@ -442,7 +548,8 @@ function App() {
                         ingestingFilingId !== null ||
                         bulkProgress !== null ||
                         isSyncing ||
-                        isReingestingAll
+                        isReingestingAll ||
+                        isEmbeddingSyncing
                       }
                     >
                       {ingestingFilingId === filing.id

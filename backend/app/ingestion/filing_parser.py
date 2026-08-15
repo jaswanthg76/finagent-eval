@@ -6,6 +6,9 @@ from typing import Protocol
 
 import tiktoken
 from bs4 import BeautifulSoup, NavigableString
+from tokenizers import Tokenizer
+
+from app.core.config import settings
 
 
 @dataclass(frozen=True)
@@ -134,10 +137,21 @@ def _tokenizer(model: str) -> tiktoken.Encoding:
         return tiktoken.get_encoding("cl100k_base")
 
 
-def count_tokens(text: str, model: str = "text-embedding-3-small") -> int:
+@cache
+def _local_tokenizer(model: str) -> Tokenizer:
+    return Tokenizer.from_pretrained(model)
+
+
+def count_tokens(
+    text: str, model: str | None = None, provider: str | None = None
+) -> int:
     """Count tokens with the selected embedding model's tokenizer."""
 
-    return len(_tokenizer(model).encode(text, disallowed_special=()))
+    selected_model = model or settings.embedding_model
+    selected_provider = provider or settings.embedding_provider
+    if selected_provider == "local":
+        return len(_local_tokenizer(selected_model).encode(text).ids)
+    return len(_tokenizer(selected_model).encode(text, disallowed_special=()))
 
 
 def _split_oversized_text(

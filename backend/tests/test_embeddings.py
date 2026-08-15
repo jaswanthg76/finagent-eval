@@ -12,7 +12,7 @@ from app.core.database import get_db
 from app.main import app
 from app.models.company import Company
 from app.models.filing_chunk import FilingChunk
-from app.retrieval.embeddings import OpenAIEmbeddingClient, content_hash
+from app.retrieval.embeddings import LocalEmbeddingClient, OpenAIEmbeddingClient, content_hash
 
 
 def _company() -> Company:
@@ -37,7 +37,9 @@ async def test_embedding_client_requests_configured_dimensions_and_orders_result
         embeddings=SimpleNamespace(create=AsyncMock(return_value=response))
     )
 
-    vectors = await OpenAIEmbeddingClient(client=sdk_client).embed_texts(["first", "second"])
+    vectors = await OpenAIEmbeddingClient(
+        client=sdk_client, model_name="text-embedding-3-small"
+    ).embed_texts(["first", "second"])
 
     assert vectors[0][0] == 1.0
     assert vectors[1][0] == 2.0
@@ -47,6 +49,21 @@ async def test_embedding_client_requests_configured_dimensions_and_orders_result
         dimensions=512,
         encoding_format="float",
     )
+
+
+@pytest.mark.asyncio
+async def test_local_embedding_client_returns_plain_vectors() -> None:
+    local_model = Mock()
+    local_model.embed.return_value = [
+        SimpleNamespace(tolist=lambda: [1.0] * settings.embedding_dimensions),
+        SimpleNamespace(tolist=lambda: [2.0] * settings.embedding_dimensions),
+    ]
+
+    vectors = await LocalEmbeddingClient(model=local_model).embed_texts(["first", "second"])
+
+    assert vectors[0][0] == 1.0
+    assert vectors[1][0] == 2.0
+    local_model.embed.assert_called_once_with(["first", "second"])
 
 
 def test_content_hash_changes_with_content() -> None:
@@ -89,7 +106,7 @@ def test_sync_chunk_embeddings_skips_unchanged_chunks() -> None:
     )
     app.dependency_overrides[get_db] = override_get_db
     try:
-        with patch("app.api.retrieval.OpenAIEmbeddingClient", return_value=embedding_client):
+        with patch("app.api.retrieval.create_embedding_client", return_value=embedding_client):
             response = TestClient(app).post("/api/companies/NVDA/embeddings/sync")
     finally:
         app.dependency_overrides.clear()
@@ -136,7 +153,7 @@ def test_semantic_search_returns_grounded_source_metadata() -> None:
     )
     app.dependency_overrides[get_db] = override_get_db
     try:
-        with patch("app.api.retrieval.OpenAIEmbeddingClient", return_value=embedding_client):
+        with patch("app.api.retrieval.create_embedding_client", return_value=embedding_client):
             response = TestClient(app).get(
                 "/api/companies/NVDA/search",
                 params={"query": "Why did revenue increase?", "limit": 5},
@@ -150,4 +167,3 @@ def test_semantic_search_returns_grounded_source_metadata() -> None:
     assert body[0]["similarity"] == pytest.approx(0.8)
     assert body[0]["section_name"] == "Management's Discussion and Analysis"
     assert body[0]["source_url"] == "https://www.sec.gov/example.htm"
-
