@@ -648,6 +648,7 @@ status
 confidence
 reason
 evidence_ids
+evaluated_evidence
 claimed_values
 calculated_values
 verifier_version
@@ -676,8 +677,28 @@ grounding_score
 numeric_accuracy_score
 citation_score
 temporal_integrity_score
+total_claim_count
+evaluated_claim_count
+verified_claim_count
+partially_supported_claim_count
 unsupported_claim_count
 contradiction_count
+error_count
+scoring_version
+created_at
+```
+
+## report_temporal_evaluations
+
+```text
+id
+report_id
+status
+score
+checked_source_count
+violations
+reason
+verifier_version
 created_at
 ```
 
@@ -1013,6 +1034,20 @@ overall_score =
 
 Store every component separately.
 
+The prototype maps claim-evaluation statuses to component values as follows:
+
+```text
+VERIFIED              = 100
+PARTIALLY_SUPPORTED   = 50
+UNSUPPORTED           = 0
+CONTRADICTED          = 0
+ERROR                 = 0
+```
+
+Only completed components participate in the overall score, and their weights are renormalized. An
+unavailable component remains `null`; it is never silently treated as 100. Temporal integrity joins
+the score only after its deterministic check runs and remains null for reports without a cutoff.
+
 Do not hard-code assumptions throughout the application.
 
 The scoring strategy should be easy to replace later.
@@ -1123,10 +1158,10 @@ POST /api/research/reports/{report_id}/claims/extract
 GET  /api/research/reports/{report_id}/claims
 POST /api/research/reports/{report_id}/verify-numeric
 POST /api/research/reports/{report_id}/verify-citations
+POST /api/research/reports/{report_id}/verify-contradictions
+POST /api/research/reports/{report_id}/verify-temporal
 GET  /api/research/reports/{report_id}/evaluations
-
-Planned report-level evaluation endpoints:
-
+GET  /api/research/reports/{report_id}/temporal-evaluation
 POST /api/research/reports/{report_id}/evaluate
 GET  /api/research/reports/{report_id}/evaluation
 ```
@@ -1461,8 +1496,14 @@ It currently supports:
 - persisted numeric evaluations with claimed values, calculated values, reasons, and verifier versions,
 - bounded qualitative entailment checks against only each claim's cited filing passages,
 - coexisting typed numeric and citation evaluations with audited evidence IDs and verifier versions,
+- cross-filing semantic retrieval of independent counterevidence for qualitative claims,
+- persisted contradiction evaluations with immutable candidate-passage snapshots and verifier versions,
+- deterministic temporal verification of every persisted source against the report cutoff,
+- persisted temporal violations with explicit passed, failed, or not-applicable states,
+- deterministic, versioned report reliability scoring over completed verification components,
+- persisted component scores and worst-case claim-status counts with unavailable checks left null,
 - UI actions for inspecting evidence, generating or reopening research, extracting claims, and
-  verifying numeric claims or filing citations.
+  verifying claims or filing citations, and displaying report reliability summaries.
 
 ## Deliberately Deferred
 
@@ -1471,8 +1512,7 @@ retrieval, and grounded-generation flow first:
 
 - multi-turn conversation history,
 - relational `claim_sources` records instead of citation IDs stored only as JSON,
-- independent temporal and cross-filing contradiction verification,
-- claim-level and report-level reliability scores,
+- contradiction-query expansion and filing-section-aware counterevidence ranking,
 - human review and approval workflows,
 - authentication, authorization, tenants, organizations, and usage quotas,
 - durable background-job orchestration, retries, dead-letter handling, and job monitoring,
@@ -1488,6 +1528,34 @@ structured metric evidence. Qualitative verification separately checks atomic cl
 cited filing excerpts. Generated answers should still be treated as assisted research: these checks
 are bounded prototype controls, not a guarantee, and users should open the attached SEC evidence
 before relying on a material claim.
+
+## V1 Fallbacks and Upgrade Paths
+
+These are deliberate prototype fallbacks, not the intended production behavior. They keep the core
+research-and-evaluation loop usable while making incomplete checks explicit rather than silently
+claiming success.
+
+| Area | V1 fallback behavior | Upgrade path |
+| --- | --- | --- |
+| Request execution | Ingestion, generation, and evaluation run inside HTTP requests. | Move long operations to durable workers with job state, retries, cancellation, and dead-letter handling. |
+| Research tool loop | The agent gets at most four tool-call rounds and is then forced to produce a final answer from evidence already retrieved. | Add token- and cost-aware orchestration with explicit completion criteria and resumable jobs. |
+| Model provider | Research, extraction, and semantic evaluation currently use Groq-compatible chat completions even though provider metadata is stored with reports. | Introduce provider interfaces and implementations for each configured provider, with capability checks at startup. |
+| Provider failures | Configuration, rate-limit, connection, malformed-output, and provider HTTP errors are returned to the caller; there is no automatic model failover. | Add bounded exponential retries, provider/model fallback, circuit breakers, and idempotent job resumption. |
+| Metric routing | Metric names are detected with a canonical keyword map, and matching questions preload only two comparable facts per metric to fit free-tier limits. | Add a versioned financial concept ontology, better period intent parsing, and budget-aware retrieval of all relevant comparable facts. |
+| Filing routing | Recent-result and MD&A preferences use question keywords such as `latest`, `why`, and `driver`. | Replace the heuristics with a tested query planner that selects forms, periods, sections, and retrieval strategies explicitly. |
+| Embeddings | Local Jina embeddings are the default fallback; searches fail clearly when compatible stored embeddings do not exist. | Run managed embedding jobs, track model migrations, and support safe reindexing plus hybrid lexical/vector ranking. |
+| Agent exhaustion | Invalid model tool arguments are returned to the model as tool errors so it can recover within the remaining rounds. | Track structured attempt state and retry only repairable tool calls with per-tool policies. |
+| Claim extraction | Existing claims are reused unless `force=true`; duplicate claim text is removed and unknown evidence IDs reject the whole extraction. | Add reviewable extraction revisions instead of deleting and replacing the current claim set. |
+| Numeric verification | Claims with no parseable percentage or scaled/currency amount become `ERROR`; claims without cited metric facts become `UNSUPPORTED`. | Parse ratios, per-share values, ranges, basis points, signs, units, fiscal periods, and restatements with typed expressions. |
+| Citation verification | A qualitative claim without a stored filing citation becomes `UNSUPPORTED` without an evaluator call. | Add a separate grounding-recovery search that may propose evidence while preserving the distinction between cited and newly discovered support. |
+| Temporal verification | Reports without an `as_of_date`, or without persisted sources, are `NOT_APPLICABLE` and contribute no temporal score. | Require explicit temporal policy by report type and distinguish truly current research from missing temporal metadata. |
+| Contradiction retrieval | Object-level claims use semantic search; evidence/meta-claims are excluded, the top 12 matches are retrieved, report chunks are removed, and at most four candidates are evaluated using relevant excerpts in batches of three claims. No candidates yields `UNSUPPORTED`. | Add negation/query expansion, lexical retrieval, section-aware ranking, period alignment, and minimum-recall evaluation datasets. |
+| Evaluator independence | Generation, extraction, citation evaluation, and contradiction evaluation may use the same configured model. | Use evaluator-model diversity and measure correlated errors on labeled regression datasets. |
+| Reliability scoring | Missing components stay `null`; available component weights are renormalized. Only explicit contradiction findings override ordinary claim status. | Calibrate weights, required components, thresholds, and confidence handling against labeled reports. |
+| Evidence relationships | Report and evaluation evidence is stored as immutable JSON snapshots and evidence IDs. | Add relational claim/evaluation evidence records while retaining snapshots for reproducibility. |
+
+The Python request-to-database flow behind these behaviors is documented in
+[PYTHON_CODE_FLOW.md](PYTHON_CODE_FLOW.md).
 
 ---
 
@@ -1579,31 +1647,56 @@ not prove that a qualitative citation entails the surrounding claim.
 
 ### Bounded Filing-Citation Entailment
 
-Qualitative claims are evaluated in a separate temperature-zero model call using only the atomic
+Qualitative claims are evaluated in isolated temperature-zero model calls using only one atomic
 claim and its cited `[F#]` passages from the immutable report snapshot. Evidence excerpts have fixed
 per-passage and total-size limits. The evaluator must distinguish explicit support, partial support,
 silence, and contradiction; semantic similarity alone is explicitly insufficient.
 
 The response is schema-validated, must return exactly the requested claim IDs, and cannot introduce
-unknown evidence. Claims without stored filing citations are marked `UNSUPPORTED` without a model
+unknown evidence IDs from another claim. Claims without stored filing citations are marked `UNSUPPORTED` without a model
 call. Results are persisted independently from numeric evaluations, including the assessed evidence
 IDs, reason, confidence, and verifier version, and are displayed alongside each atomic claim.
 
+### Deterministic Temporal Integrity
+
+For reports with an `as_of_date`, backend code checks every persisted metric and filing source date
+against the historical cutoff. Missing evidence snapshots, invalid dates, and sources filed after
+the cutoff are explicit violations. Passing checks contribute 100 and failures contribute 0 to the
+next reliability calculation. Reports without a cutoff are `NOT_APPLICABLE` and contribute no score.
+No LLM participates in this check.
+
+### Independent Contradiction Checking
+
+Each eligible qualitative claim is independently used to retrieve candidate passages from the same
+company's other SEC filing chunks. Retrieval reapplies the report's historical cutoff, searches across filing
+forms, and excludes every filing chunk already present in the report snapshot. Claims about the
+report's citations or evidence sufficiency are excluded because independent evidence cannot
+contradict what the original report happened to retrieve. Candidate chunks are reduced to
+claim-relevant windows and evaluated in batches of at most three claims. A bounded, temperature-zero
+evaluator distinguishes explicit conflict from silence, ambiguity, qualification, and legitimate
+changes between periods.
+
+Results are persisted as a separate `CONTRADICTION` claim-evaluation type. The complete candidate
+passages are snapshotted with the result, while `evidence_ids` records the passages the evaluator
+said materially informed its decision. Only an explicit `CONTRADICTED` result can override the
+claim's normal numeric or citation status in report-level counts; irrelevant counterevidence does
+not turn an otherwise supported claim into an unsupported one.
+
 ## Guardrails Still Needed for Production
 
-The prototype now performs independent numeric recalculation and bounded qualitative entailment
-checks, but an evaluator model can still misunderstand a passage or share biases with the generation
-model. Truncated excerpts can also omit relevant context, and the system does not yet independently
-reapply every temporal constraint or search other filings for contradictions.
+The prototype now performs independent numeric recalculation, bounded qualitative entailment checks,
+deterministic temporal validation, and cross-filing counterevidence checks. An evaluator model can
+still misunderstand a passage or share biases with the generation model. Truncated excerpts can omit
+relevant context, and semantic similarity retrieval can miss counterevidence phrased in dissimilar
+language.
 
 The production verification layer should therefore:
 
 1. Expand numeric parsing to ratios, per-share values, ranges, and unusual units.
-2. Reapply temporal constraints independently of generation.
-3. Search for counterevidence and contradictions within the answer and across filings.
-4. Add evaluator-model diversity and regression datasets to measure correlated errors.
-5. Assign an overall reliability score from the independent claim checks.
-6. Require human review for high-impact or low-confidence outputs.
+2. Add contradiction-query expansion and section-aware retrieval to improve counterevidence recall.
+3. Add evaluator-model diversity and regression datasets to measure correlated errors.
+4. Calibrate scoring weights and thresholds against labeled evaluation datasets.
+5. Require human review for high-impact or low-confidence outputs.
 
 The goal is not to claim that the LLM cannot hallucinate. The goal is to constrain what it can see,
 preserve auditable evidence, and eventually verify its output independently.

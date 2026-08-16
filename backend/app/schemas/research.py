@@ -103,11 +103,12 @@ EvaluationStatus = Literal[
 class ClaimEvaluationRead(BaseModel):
     id: int
     claim_id: int
-    evaluation_type: Literal["NUMERIC", "CITATION"]
+    evaluation_type: Literal["NUMERIC", "CITATION", "CONTRADICTION"]
     status: EvaluationStatus
     confidence: float
     reason: str
     evidence_ids: list[str]
+    evaluated_evidence: list[dict[str, object]]
     claimed_values: list[dict[str, object]]
     calculated_values: list[dict[str, object]]
     verifier_version: str
@@ -126,3 +127,41 @@ class CitationVerificationResult(BaseModel):
     eligible_claims: int
     verified_claims: int
     evaluations: list[ClaimEvaluationRead]
+
+
+class ContradictionVerificationResult(BaseModel):
+    report_id: int
+    eligible_claims: int
+    contradicted_claims: int
+    evaluations: list[ClaimEvaluationRead]
+
+
+class ReportEvaluationRead(BaseModel):
+    id: int
+    report_id: int
+    overall_score: float
+    grounding_score: float | None
+    numeric_accuracy_score: float | None
+    citation_score: float
+    temporal_integrity_score: float | None
+    total_claim_count: int
+    evaluated_claim_count: int
+    verified_claim_count: int
+    partially_supported_claim_count: int
+    unsupported_claim_count: int
+    contradiction_count: int
+    error_count: int
+    scoring_version: str
+    created_at: datetime
+
+
+class TemporalEvaluationRead(BaseModel):
+    id: int
+    report_id: int
+    status: Literal["PASSED", "FAILED", "NOT_APPLICABLE"]
+    score: float | None
+    checked_source_count: int
+    violations: list[dict[str, str]]
+    reason: str
+    verifier_version: str
+    created_at: datetime

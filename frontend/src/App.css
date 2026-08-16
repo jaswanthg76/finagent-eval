@@ -321,6 +321,134 @@ h1 {
   font-size: 11px;
 }
 
+.reliability-summary {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr);
+  gap: 18px;
+  margin: 14px 0;
+  padding: 18px;
+  border: 1px solid #b9ddc7;
+  border-radius: 10px;
+  background: #f7fbf8;
+}
+
+.reliability-overall {
+  display: grid;
+  align-content: center;
+  padding-right: 18px;
+  border-right: 1px solid #cfe4d6;
+}
+
+.reliability-overall span,
+.reliability-components span {
+  color: var(--muted-light);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.reliability-overall strong {
+  color: var(--green);
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 38px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.reliability-overall small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.reliability-components {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 18px;
+}
+
+.reliability-components > div {
+  display: grid;
+  gap: 3px;
+}
+
+.reliability-components strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.reliability-counts {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.reliability-counts span {
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  background: #fff;
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.temporal-result {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fafbf8;
+}
+
+.temporal-result > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.temporal-result strong {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.temporal-result span,
+.temporal-result li {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.temporal-result ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.temporal-result.passed {
+  border-color: #b9ddc7;
+  background: #f1faf4;
+}
+
+.temporal-result.passed strong {
+  color: #1f6e41;
+}
+
+.temporal-result.failed {
+  border-color: #efd7d3;
+  background: #fff8f7;
+}
+
+.temporal-result.failed strong {
+  color: #8f2d2d;
+}
+
 .claim-list {
   display: grid;
   gap: 7px;
@@ -1166,6 +1294,22 @@ h2 {
 
   .claim-results-actions {
     width: 100%;
+  }
+
+  .reliability-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .reliability-overall {
+    padding: 0 0 14px;
+    border-right: 0;
+    border-bottom: 1px solid #cfe4d6;
+  }
+
+  .temporal-result > div {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
   }
 
   .claim-evaluation {

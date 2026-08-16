@@ -171,11 +171,12 @@ type ClaimExtractionResult = {
 type ClaimEvaluation = {
   id: number
   claim_id: number
-  evaluation_type: 'NUMERIC' | 'CITATION'
+  evaluation_type: 'NUMERIC' | 'CITATION' | 'CONTRADICTION'
   status: 'VERIFIED' | 'PARTIALLY_SUPPORTED' | 'UNSUPPORTED' | 'CONTRADICTED' | 'ERROR'
   confidence: number
   reason: string
   evidence_ids: string[]
+  evaluated_evidence: Array<Record<string, unknown>>
   claimed_values: Array<Record<string, unknown>>
   calculated_values: Array<Record<string, unknown>>
   verifier_version: string
@@ -190,6 +191,48 @@ type NumericVerificationResult = {
 }
 
 type CitationVerificationResult = NumericVerificationResult
+
+type ContradictionVerificationResult = {
+  report_id: number
+  eligible_claims: number
+  contradicted_claims: number
+  evaluations: ClaimEvaluation[]
+}
+
+type ReportEvaluation = {
+  id: number
+  report_id: number
+  overall_score: number
+  grounding_score: number | null
+  numeric_accuracy_score: number | null
+  citation_score: number
+  temporal_integrity_score: number | null
+  total_claim_count: number
+  evaluated_claim_count: number
+  verified_claim_count: number
+  partially_supported_claim_count: number
+  unsupported_claim_count: number
+  contradiction_count: number
+  error_count: number
+  scoring_version: string
+  created_at: string
+}
+
+type TemporalEvaluation = {
+  id: number
+  report_id: number
+  status: 'PASSED' | 'FAILED' | 'NOT_APPLICABLE'
+  score: number | null
+  checked_source_count: number
+  violations: Array<{
+    evidence_id: string
+    reason: string
+    detail: string
+  }>
+  reason: string
+  verifier_version: string
+  created_at: string
+}
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
@@ -265,6 +308,12 @@ function App() {
   const [numericVerificationMessage, setNumericVerificationMessage] = useState<string | null>(null)
   const [isVerifyingCitations, setIsVerifyingCitations] = useState(false)
   const [citationVerificationMessage, setCitationVerificationMessage] = useState<string | null>(null)
+  const [isCheckingContradictions, setIsCheckingContradictions] = useState(false)
+  const [contradictionMessage, setContradictionMessage] = useState<string | null>(null)
+  const [reportEvaluation, setReportEvaluation] = useState<ReportEvaluation | null>(null)
+  const [isScoringReport, setIsScoringReport] = useState(false)
+  const [temporalEvaluation, setTemporalEvaluation] = useState<TemporalEvaluation | null>(null)
+  const [isVerifyingTemporal, setIsVerifyingTemporal] = useState(false)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -311,6 +360,9 @@ function App() {
     setClaimEvaluations([])
     setNumericVerificationMessage(null)
     setCitationVerificationMessage(null)
+    setContradictionMessage(null)
+    setReportEvaluation(null)
+    setTemporalEvaluation(null)
     setSavedReports([])
     setReportsError(null)
     setIsReportsLoading(true)
@@ -560,6 +612,9 @@ function App() {
     setClaimEvaluations([])
     setNumericVerificationMessage(null)
     setCitationVerificationMessage(null)
+    setContradictionMessage(null)
+    setReportEvaluation(null)
+    setTemporalEvaluation(null)
     setSearchError(null)
     setHasSearched(true)
     try {
@@ -603,6 +658,9 @@ function App() {
     setClaimEvaluations([])
     setNumericVerificationMessage(null)
     setCitationVerificationMessage(null)
+    setContradictionMessage(null)
+    setReportEvaluation(null)
+    setTemporalEvaluation(null)
     try {
       const response = await fetch(`${API_URL}/api/research`, {
         method: 'POST',
@@ -650,20 +708,33 @@ function App() {
     setSearchError(null)
     setClaimsError(null)
     try {
-      const [reportResponse, claimsResponse, evaluationsResponse] = await Promise.all([
-        fetch(`${API_URL}/api/research/reports/${reportId}`),
-        fetch(`${API_URL}/api/research/reports/${reportId}/claims`),
-        fetch(`${API_URL}/api/research/reports/${reportId}/evaluations`),
-      ])
+      const [
+        reportResponse,
+        claimsResponse,
+        evaluationsResponse,
+        scoreResponse,
+        temporalResponse,
+      ] = await Promise.all([
+          fetch(`${API_URL}/api/research/reports/${reportId}`),
+          fetch(`${API_URL}/api/research/reports/${reportId}/claims`),
+          fetch(`${API_URL}/api/research/reports/${reportId}/evaluations`),
+          fetch(`${API_URL}/api/research/reports/${reportId}/evaluation`),
+          fetch(`${API_URL}/api/research/reports/${reportId}/temporal-evaluation`),
+        ])
       if (!reportResponse.ok) throw new Error(await responseError(reportResponse))
       if (!claimsResponse.ok) throw new Error(await responseError(claimsResponse))
       if (!evaluationsResponse.ok) throw new Error(await responseError(evaluationsResponse))
+      if (!scoreResponse.ok) throw new Error(await responseError(scoreResponse))
+      if (!temporalResponse.ok) throw new Error(await responseError(temporalResponse))
       const result = (await reportResponse.json()) as ResearchAnswer
       setResearchAnswer(result)
       setResearchClaims((await claimsResponse.json()) as ResearchClaim[])
       setClaimEvaluations((await evaluationsResponse.json()) as ClaimEvaluation[])
+      setReportEvaluation((await scoreResponse.json()) as ReportEvaluation | null)
+      setTemporalEvaluation((await temporalResponse.json()) as TemporalEvaluation | null)
       setNumericVerificationMessage(null)
       setCitationVerificationMessage(null)
+      setContradictionMessage(null)
       setSearchQuery(result.question)
       setSearchForm(result.form ?? '')
       setSearchAsOfDate(result.as_of_date ?? '')
@@ -694,6 +765,8 @@ function App() {
       setClaimEvaluations([])
       setNumericVerificationMessage(null)
       setCitationVerificationMessage(null)
+      setContradictionMessage(null)
+      setReportEvaluation(null)
     } catch (requestError) {
       if (requestError instanceof Error) setClaimsError(requestError.message)
     } finally {
@@ -718,6 +791,7 @@ function App() {
         ...current.filter((evaluation) => evaluation.evaluation_type !== 'NUMERIC'),
         ...result.evaluations,
       ])
+      setReportEvaluation(null)
       setNumericVerificationMessage(
         result.eligible_claims === 0
           ? 'No explicit numeric or comparative claims were available to verify.'
@@ -747,6 +821,7 @@ function App() {
         ...current.filter((evaluation) => evaluation.evaluation_type !== 'CITATION'),
         ...result.evaluations,
       ])
+      setReportEvaluation(null)
       setCitationVerificationMessage(
         result.eligible_claims === 0
           ? 'No qualitative claims were available for citation verification.'
@@ -756,6 +831,75 @@ function App() {
       if (requestError instanceof Error) setClaimsError(requestError.message)
     } finally {
       setIsVerifyingCitations(false)
+    }
+  }
+
+  async function scoreResearchReport() {
+    if (!researchAnswer) return
+
+    setIsScoringReport(true)
+    setClaimsError(null)
+    try {
+      const response = await fetch(
+        `${API_URL}/api/research/reports/${researchAnswer.id}/evaluate`,
+        { method: 'POST' },
+      )
+      if (!response.ok) throw new Error(await responseError(response))
+      setReportEvaluation((await response.json()) as ReportEvaluation)
+    } catch (requestError) {
+      if (requestError instanceof Error) setClaimsError(requestError.message)
+    } finally {
+      setIsScoringReport(false)
+    }
+  }
+
+  async function checkContradictions() {
+    if (!researchAnswer) return
+
+    setIsCheckingContradictions(true)
+    setClaimsError(null)
+    setContradictionMessage(null)
+    try {
+      const response = await fetch(
+        `${API_URL}/api/research/reports/${researchAnswer.id}/verify-contradictions`,
+        { method: 'POST' },
+      )
+      if (!response.ok) throw new Error(await responseError(response))
+      const result = (await response.json()) as ContradictionVerificationResult
+      setClaimEvaluations((current) => [
+        ...current.filter((evaluation) => evaluation.evaluation_type !== 'CONTRADICTION'),
+        ...result.evaluations,
+      ])
+      setReportEvaluation(null)
+      setContradictionMessage(
+        result.eligible_claims === 0
+          ? 'No qualitative claims were available for contradiction checking.'
+          : `${result.contradicted_claims} of ${result.eligible_claims} claims had explicit counterevidence.`,
+      )
+    } catch (requestError) {
+      if (requestError instanceof Error) setClaimsError(requestError.message)
+    } finally {
+      setIsCheckingContradictions(false)
+    }
+  }
+
+  async function verifyTemporalIntegrity() {
+    if (!researchAnswer) return
+
+    setIsVerifyingTemporal(true)
+    setClaimsError(null)
+    try {
+      const response = await fetch(
+        `${API_URL}/api/research/reports/${researchAnswer.id}/verify-temporal`,
+        { method: 'POST' },
+      )
+      if (!response.ok) throw new Error(await responseError(response))
+      setTemporalEvaluation((await response.json()) as TemporalEvaluation)
+      setReportEvaluation(null)
+    } catch (requestError) {
+      if (requestError instanceof Error) setClaimsError(requestError.message)
+    } finally {
+      setIsVerifyingTemporal(false)
     }
   }
 
@@ -1022,13 +1166,134 @@ function App() {
                               ).length} citation checks`
                             : 'Verify filing citations'}
                       </button>
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        onClick={checkContradictions}
+                        disabled={
+                          isCheckingContradictions
+                          || claimEvaluations.some(
+                            (evaluation) => evaluation.evaluation_type === 'CONTRADICTION',
+                          )
+                        }
+                      >
+                        {isCheckingContradictions
+                          ? 'Searching counterevidence…'
+                          : claimEvaluations.some(
+                                (evaluation) => evaluation.evaluation_type === 'CONTRADICTION',
+                              )
+                            ? `${claimEvaluations.filter(
+                                (evaluation) => evaluation.evaluation_type === 'CONTRADICTION',
+                              ).length} contradiction checks`
+                            : 'Check contradictions'}
+                      </button>
+                      <button
+                        className="sync-button"
+                        type="button"
+                        onClick={verifyTemporalIntegrity}
+                        disabled={isVerifyingTemporal || temporalEvaluation !== null}
+                      >
+                        {isVerifyingTemporal
+                          ? 'Checking dates…'
+                          : temporalEvaluation
+                            ? `Dates ${temporalEvaluation.status.replaceAll('_', ' ')}`
+                            : 'Verify dates'}
+                      </button>
+                      <button
+                        className="sync-button"
+                        type="button"
+                        onClick={scoreResearchReport}
+                        disabled={
+                          isScoringReport
+                          || claimEvaluations.length === 0
+                          || reportEvaluation !== null
+                        }
+                      >
+                        {isScoringReport
+                          ? 'Scoring report…'
+                          : reportEvaluation
+                            ? `Reliability ${reportEvaluation.overall_score.toFixed(1)}`
+                            : 'Score reliability'}
+                      </button>
                     </div>
                   </div>
+                  {reportEvaluation && (
+                    <section className="reliability-summary" aria-label="Research reliability">
+                      <div className="reliability-overall">
+                        <span>Research reliability</span>
+                        <strong>{reportEvaluation.overall_score.toFixed(1)}</strong>
+                        <small>/ 100 · available checks</small>
+                      </div>
+                      <div className="reliability-components">
+                        <div>
+                          <span>Grounding</span>
+                          <strong>
+                            {reportEvaluation.grounding_score === null
+                              ? 'Not checked'
+                              : `${reportEvaluation.grounding_score.toFixed(1)}%`}
+                          </strong>
+                        </div>
+                        <div>
+                          <span>Numeric accuracy</span>
+                          <strong>
+                            {reportEvaluation.numeric_accuracy_score === null
+                              ? 'Not checked'
+                              : `${reportEvaluation.numeric_accuracy_score.toFixed(1)}%`}
+                          </strong>
+                        </div>
+                        <div>
+                          <span>Citation coverage</span>
+                          <strong>{reportEvaluation.citation_score.toFixed(1)}%</strong>
+                        </div>
+                        <div>
+                          <span>Temporal integrity</span>
+                          <strong>
+                            {reportEvaluation.temporal_integrity_score === null
+                              ? 'Not checked'
+                              : `${reportEvaluation.temporal_integrity_score.toFixed(1)}%`}
+                          </strong>
+                        </div>
+                      </div>
+                      <div className="reliability-counts">
+                        <span>{reportEvaluation.verified_claim_count} verified</span>
+                        <span>
+                          {reportEvaluation.partially_supported_claim_count} partial
+                        </span>
+                        <span>{reportEvaluation.unsupported_claim_count} unsupported</span>
+                        <span>{reportEvaluation.contradiction_count} contradicted</span>
+                        {reportEvaluation.error_count > 0 && (
+                          <span>{reportEvaluation.error_count} errors</span>
+                        )}
+                      </div>
+                    </section>
+                  )}
+                  {temporalEvaluation && (
+                    <div className={`temporal-result ${temporalEvaluation.status.toLowerCase()}`}>
+                      <div>
+                        <strong>
+                          Temporal {temporalEvaluation.status.replaceAll('_', ' ')}
+                        </strong>
+                        <span>{temporalEvaluation.reason}</span>
+                      </div>
+                      {temporalEvaluation.violations.length > 0 && (
+                        <ul>
+                          {temporalEvaluation.violations.map((violation) => (
+                            <li key={`${violation.evidence_id}-${violation.reason}`}>
+                              [{violation.evidence_id}] {violation.detail}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
                   {numericVerificationMessage && (
                     <p className="numeric-verification-message">{numericVerificationMessage}</p>
                   )}
                   {citationVerificationMessage && (
                     <p className="numeric-verification-message">{citationVerificationMessage}</p>
+                  )}
+                  {contradictionMessage && (
+                    <p className="numeric-verification-message">{contradictionMessage}</p>
                   )}
                   <div className="claim-list">
                     {researchClaims.map((claim) => {
@@ -1055,10 +1320,28 @@ function App() {
                             {evaluations.map((evaluation) => (
                               <div className="claim-evaluation" key={evaluation.id}>
                                 <span className={`evaluation-status ${evaluation.status.toLowerCase()}`}>
-                                  {evaluation.evaluation_type === 'NUMERIC' ? 'Numeric' : 'Citation'} ·{' '}
+                                  {evaluation.evaluation_type === 'NUMERIC'
+                                    ? 'Numeric'
+                                    : evaluation.evaluation_type === 'CITATION'
+                                      ? 'Citation'
+                                      : 'Contradiction'} ·{' '}
                                   {evaluation.status.replaceAll('_', ' ')}
                                 </span>
                                 <p>{evaluation.reason}</p>
+                                {evaluation.evaluation_type === 'CONTRADICTION'
+                                  && evaluation.evaluated_evidence.length > 0 && (
+                                  <details className="evidence-details">
+                                    <summary>
+                                      Review {evaluation.evaluated_evidence.length} independent passages
+                                    </summary>
+                                    {evaluation.evaluated_evidence.map((evidence) => (
+                                      <p key={String(evidence.evidence_id)}>
+                                        [{String(evidence.evidence_id)}] {String(evidence.form)} ·{' '}
+                                        {String(evidence.filing_date)} — {String(evidence.content).slice(0, 500)}
+                                      </p>
+                                    ))}
+                                  </details>
+                                )}
                               </div>
                             ))}
                           </div>

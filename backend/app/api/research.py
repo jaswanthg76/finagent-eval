@@ -16,15 +16,33 @@ from app.evaluation.citations import (
     CitationEvaluationError,
     GroqCitationEvaluator,
 )
+from app.evaluation.contradiction import (
+    CONTRADICTION_BATCH_SIZE,
+    CONTRADICTION_VERIFIER_VERSION,
+    ContradictionClaimInput,
+    ContradictionEvaluationConfigurationError,
+    ContradictionEvaluationError,
+    GroqContradictionEvaluator,
+    is_contradiction_eligible,
+)
 from app.evaluation.numeric import (
     NUMERIC_VERIFIER_VERSION,
     is_numeric_claim,
     verify_numeric_claim,
 )
+from app.evaluation.scoring import (
+    SCORING_VERSION,
+    ScoringClaim,
+    ScoringEvaluation,
+    calculate_report_score,
+)
+from app.evaluation.temporal import TEMPORAL_VERIFIER_VERSION, verify_temporal_integrity
 from app.models.claim_evaluation import ClaimEvaluation
 from app.models.company import Company
 from app.models.filing import Filing
 from app.models.financial_metric import FinancialMetric
+from app.models.report_evaluation import ReportEvaluation
+from app.models.report_temporal_evaluation import ReportTemporalEvaluation
 from app.models.research_claim import ResearchClaim
 from app.models.research_report import ResearchReport
 from app.research.agent import (
@@ -43,7 +61,9 @@ from app.schemas.research import (
     CitationVerificationResult,
     ClaimEvaluationRead,
     ClaimExtractionResult,
+    ContradictionVerificationResult,
     NumericVerificationResult,
+    ReportEvaluationRead,
     ResearchAnswer,
     ResearchClaimRead,
     ResearchReportRead,
@@ -51,6 +71,7 @@ from app.schemas.research import (
     ResearchRequest,
     ResearchSource,
     ResearchToolCall,
+    TemporalEvaluationRead,
 )
 from app.schemas.retrieval import MetricEvidence, SemanticSearchResult
 
@@ -96,8 +117,58 @@ def _evaluation_read(evaluation: ClaimEvaluation) -> ClaimEvaluationRead:
         confidence=float(evaluation.confidence),
         reason=evaluation.reason,
         evidence_ids=evaluation.evidence_ids,
+        evaluated_evidence=evaluation.evaluated_evidence,
         claimed_values=evaluation.claimed_values,
         calculated_values=evaluation.calculated_values,
+        verifier_version=evaluation.verifier_version,
+        created_at=evaluation.created_at,
+    )
+
+
+def _report_evaluation_read(evaluation: ReportEvaluation) -> ReportEvaluationRead:
+    return ReportEvaluationRead(
+        id=evaluation.id,
+        report_id=evaluation.report_id,
+        overall_score=float(evaluation.overall_score),
+        grounding_score=(
+            float(evaluation.grounding_score)
+            if evaluation.grounding_score is not None
+            else None
+        ),
+        numeric_accuracy_score=(
+            float(evaluation.numeric_accuracy_score)
+            if evaluation.numeric_accuracy_score is not None
+            else None
+        ),
+        citation_score=float(evaluation.citation_score),
+        temporal_integrity_score=(
+            float(evaluation.temporal_integrity_score)
+            if evaluation.temporal_integrity_score is not None
+            else None
+        ),
+        total_claim_count=evaluation.total_claim_count,
+        evaluated_claim_count=evaluation.evaluated_claim_count,
+        verified_claim_count=evaluation.verified_claim_count,
+        partially_supported_claim_count=evaluation.partially_supported_claim_count,
+        unsupported_claim_count=evaluation.unsupported_claim_count,
+        contradiction_count=evaluation.contradiction_count,
+        error_count=evaluation.error_count,
+        scoring_version=evaluation.scoring_version,
+        created_at=evaluation.created_at,
+    )
+
+
+def _temporal_evaluation_read(
+    evaluation: ReportTemporalEvaluation,
+) -> TemporalEvaluationRead:
+    return TemporalEvaluationRead(
+        id=evaluation.id,
+        report_id=evaluation.report_id,
+        status=evaluation.status,
+        score=float(evaluation.score) if evaluation.score is not None else None,
+        checked_source_count=evaluation.checked_source_count,
+        violations=evaluation.violations,
+        reason=evaluation.reason,
         verifier_version=evaluation.verifier_version,
         created_at=evaluation.created_at,
     )
@@ -488,6 +559,7 @@ async def extract_research_claims(
 
     if existing:
         await db.execute(delete(ResearchClaim).where(ResearchClaim.report_id == report_id))
+        await db.execute(delete(ReportEvaluation).where(ReportEvaluation.report_id == report_id))
     claims = [
         ResearchClaim(
             report_id=report_id,
@@ -590,6 +662,7 @@ async def verify_report_numeric_claims(
                 ClaimEvaluation.evaluation_type == "NUMERIC",
             )
         )
+    await db.execute(delete(ReportEvaluation).where(ReportEvaluation.report_id == report_id))
     evaluations: list[ClaimEvaluation] = []
     for claim in eligible:
         outcome = verify_numeric_claim(
@@ -607,6 +680,7 @@ async def verify_report_numeric_claims(
                 evidence_ids=[
                     evidence_id for evidence_id in claim.citation_ids if evidence_id.startswith("M")
                 ],
+                evaluated_evidence=[],
                 claimed_values=outcome.claimed_values,
                 calculated_values=outcome.calculated_values,
                 verifier_version=NUMERIC_VERIFIER_VERSION,
@@ -689,17 +763,18 @@ async def verify_report_citations(
 
     model_results = []
     if model_inputs:
-        cited_ids = {
-            evidence_id for claim in model_inputs for evidence_id in claim.evidence_ids
-        }
         try:
-            model_results = await GroqCitationEvaluator().evaluate(
-                claims=model_inputs,
-                evidence_by_id={
-                    evidence_id: chunks_by_evidence_id[evidence_id]
-                    for evidence_id in cited_ids
-                },
-            )
+            evaluator = GroqCitationEvaluator()
+            for claim_input in model_inputs:
+                model_results.extend(
+                    await evaluator.evaluate(
+                        claims=[claim_input],
+                        evidence_by_id={
+                            evidence_id: chunks_by_evidence_id[evidence_id]
+                            for evidence_id in claim_input.evidence_ids
+                        },
+                    )
+                )
         except CitationEvaluationConfigurationError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
         except CitationEvaluationError as error:
@@ -713,6 +788,7 @@ async def verify_report_citations(
                 ClaimEvaluation.evaluation_type == "CITATION",
             )
         )
+    await db.execute(delete(ReportEvaluation).where(ReportEvaluation.report_id == report_id))
     evaluations: list[ClaimEvaluation] = []
     for claim in eligible:
         filing_ids = [
@@ -732,7 +808,11 @@ async def verify_report_citations(
                     if result
                     else "The qualitative claim does not cite any stored filing passage."
                 ),
-                evidence_ids=filing_ids,
+                evidence_ids=result.evidence_ids if result else [],
+                evaluated_evidence=[
+                    {"evidence_id": evidence_id, **chunks_by_evidence_id[evidence_id]}
+                    for evidence_id in filing_ids
+                ],
                 claimed_values=[],
                 calculated_values=[],
                 verifier_version=CITATION_VERIFIER_VERSION,
@@ -748,3 +828,335 @@ async def verify_report_citations(
         verified_claims=sum(item.status == "VERIFIED" for item in evaluations),
         evaluations=[_evaluation_read(item) for item in evaluations],
     )
+
+
+@router.post(
+    "/reports/{report_id}/verify-contradictions",
+    response_model=ContradictionVerificationResult,
+)
+async def verify_report_contradictions(
+    report_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    force: bool = False,
+) -> ContradictionVerificationResult:
+    report = await db.scalar(select(ResearchReport).where(ResearchReport.id == report_id))
+    if report is None:
+        raise HTTPException(status_code=404, detail=f"Research report {report_id} was not found")
+    claims_result = await db.execute(
+        select(ResearchClaim)
+        .where(ResearchClaim.report_id == report_id)
+        .order_by(ResearchClaim.claim_index)
+    )
+    claims = list(claims_result.scalars().all())
+    eligible = [
+        claim
+        for claim in claims
+        if is_contradiction_eligible(claim.claim_type, claim.claim_text)
+    ]
+    all_claim_ids = [claim.id for claim in claims]
+    existing_result = await db.execute(
+        select(ClaimEvaluation).where(
+            ClaimEvaluation.claim_id.in_(all_claim_ids),
+            ClaimEvaluation.evaluation_type == "CONTRADICTION",
+        )
+    ) if all_claim_ids else None
+    existing = list(existing_result.scalars().all()) if existing_result is not None else []
+    if not eligible:
+        if existing:
+            await db.execute(
+                delete(ClaimEvaluation).where(
+                    ClaimEvaluation.claim_id.in_(all_claim_ids),
+                    ClaimEvaluation.evaluation_type == "CONTRADICTION",
+                )
+            )
+            await db.execute(delete(ReportEvaluation).where(ReportEvaluation.report_id == report_id))
+            await db.commit()
+        return ContradictionVerificationResult(
+            report_id=report_id,
+            eligible_claims=0,
+            contradicted_claims=0,
+            evaluations=[],
+        )
+
+    eligible_ids = [claim.id for claim in eligible]
+    existing_is_complete = (
+        len(existing) == len(eligible)
+        and {item.claim_id for item in existing} == set(eligible_ids)
+    )
+    if existing_is_complete and not force:
+        ordered = sorted(existing, key=lambda evaluation: eligible_ids.index(evaluation.claim_id))
+        return ContradictionVerificationResult(
+            report_id=report_id,
+            eligible_claims=len(eligible),
+            contradicted_claims=sum(item.status == "CONTRADICTED" for item in ordered),
+            evaluations=[_evaluation_read(item) for item in ordered],
+        )
+
+    company = await db.scalar(select(Company).where(Company.id == report.company_id))
+    if company is None:
+        raise HTTPException(status_code=409, detail="The report company no longer exists")
+    report_chunk_ids = {
+        int(chunk["chunk_id"])
+        for chunk in report.chunks
+        if chunk.get("chunk_id") is not None
+    }
+    evidence_by_id: dict[str, dict[str, object]] = {}
+    candidate_ids_by_claim: dict[int, list[str]] = {}
+    for claim in eligible:
+        retrieved = await _semantic_search_for_company(
+            company=company,
+            query=claim.claim_text,
+            db=db,
+            as_of_date=report.as_of_date,
+            form=None,
+            limit=12,
+        )
+        independent = [item for item in retrieved if item.chunk_id not in report_chunk_ids][:4]
+        candidate_ids: list[str] = []
+        for item in independent:
+            evidence_id = f"C{item.chunk_id}"
+            candidate_ids.append(evidence_id)
+            evidence_by_id[evidence_id] = item.model_dump(mode="json")
+        candidate_ids_by_claim[claim.id] = candidate_ids
+
+    model_inputs = [
+        ContradictionClaimInput(
+            claim_id=claim.id,
+            claim_text=claim.claim_text,
+            evidence_ids=candidate_ids_by_claim[claim.id],
+        )
+        for claim in eligible
+        if candidate_ids_by_claim[claim.id]
+    ]
+    model_results = []
+    if model_inputs:
+        try:
+            evaluator = GroqContradictionEvaluator()
+            for start in range(0, len(model_inputs), CONTRADICTION_BATCH_SIZE):
+                batch = model_inputs[start : start + CONTRADICTION_BATCH_SIZE]
+                batch_evidence_ids = {
+                    evidence_id for item in batch for evidence_id in item.evidence_ids
+                }
+                model_results.extend(
+                    await evaluator.evaluate(
+                        claims=batch,
+                        evidence_by_id={
+                            evidence_id: evidence_by_id[evidence_id]
+                            for evidence_id in batch_evidence_ids
+                        },
+                    )
+                )
+        except ContradictionEvaluationConfigurationError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        except ContradictionEvaluationError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+    result_by_claim_id = {result.claim_id: result for result in model_results}
+
+    if existing:
+        await db.execute(
+            delete(ClaimEvaluation).where(
+                ClaimEvaluation.claim_id.in_(all_claim_ids),
+                ClaimEvaluation.evaluation_type == "CONTRADICTION",
+            )
+        )
+    await db.execute(delete(ReportEvaluation).where(ReportEvaluation.report_id == report_id))
+    evaluations: list[ClaimEvaluation] = []
+    for claim in eligible:
+        candidate_ids = candidate_ids_by_claim[claim.id]
+        result = result_by_claim_id.get(claim.id)
+        evaluations.append(
+            ClaimEvaluation(
+                claim_id=claim.id,
+                evaluation_type="CONTRADICTION",
+                status=result.status if result else "UNSUPPORTED",
+                confidence=result.confidence if result else 1.0,
+                reason=(
+                    result.reason
+                    if result
+                    else "No independent filing passages were available to assess for contradiction."
+                ),
+                evidence_ids=result.evidence_ids if result else [],
+                evaluated_evidence=[
+                    {"evidence_id": evidence_id, **evidence_by_id[evidence_id]}
+                    for evidence_id in candidate_ids
+                ],
+                claimed_values=[],
+                calculated_values=[],
+                verifier_version=CONTRADICTION_VERIFIER_VERSION,
+            )
+        )
+    db.add_all(evaluations)
+    await db.commit()
+    for evaluation in evaluations:
+        await db.refresh(evaluation)
+    return ContradictionVerificationResult(
+        report_id=report_id,
+        eligible_claims=len(eligible),
+        contradicted_claims=sum(item.status == "CONTRADICTED" for item in evaluations),
+        evaluations=[_evaluation_read(item) for item in evaluations],
+    )
+
+
+@router.get(
+    "/reports/{report_id}/temporal-evaluation",
+    response_model=TemporalEvaluationRead | None,
+)
+async def get_temporal_evaluation(
+    report_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> TemporalEvaluationRead | None:
+    if await db.scalar(select(ResearchReport.id).where(ResearchReport.id == report_id)) is None:
+        raise HTTPException(status_code=404, detail=f"Research report {report_id} was not found")
+    evaluation = await db.scalar(
+        select(ReportTemporalEvaluation).where(
+            ReportTemporalEvaluation.report_id == report_id
+        )
+    )
+    return _temporal_evaluation_read(evaluation) if evaluation else None
+
+
+@router.post(
+    "/reports/{report_id}/verify-temporal",
+    response_model=TemporalEvaluationRead,
+)
+async def verify_report_temporal_integrity(
+    report_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    force: bool = False,
+) -> TemporalEvaluationRead:
+    report = await db.scalar(select(ResearchReport).where(ResearchReport.id == report_id))
+    if report is None:
+        raise HTTPException(status_code=404, detail=f"Research report {report_id} was not found")
+    existing = await db.scalar(
+        select(ReportTemporalEvaluation).where(
+            ReportTemporalEvaluation.report_id == report_id
+        )
+    )
+    if existing is not None and not force:
+        return _temporal_evaluation_read(existing)
+
+    outcome = verify_temporal_integrity(
+        as_of_date=report.as_of_date,
+        sources=report.sources,
+        metrics=report.metrics,
+        chunks=report.chunks,
+    )
+    if existing is not None:
+        await db.delete(existing)
+    await db.execute(delete(ReportEvaluation).where(ReportEvaluation.report_id == report_id))
+    evaluation = ReportTemporalEvaluation(
+        report_id=report_id,
+        status=outcome.status,
+        score=outcome.score,
+        checked_source_count=outcome.checked_source_count,
+        violations=outcome.violations,
+        reason=outcome.reason,
+        verifier_version=TEMPORAL_VERIFIER_VERSION,
+    )
+    db.add(evaluation)
+    await db.commit()
+    await db.refresh(evaluation)
+    return _temporal_evaluation_read(evaluation)
+
+
+@router.get(
+    "/reports/{report_id}/evaluation",
+    response_model=ReportEvaluationRead | None,
+)
+async def get_report_evaluation(
+    report_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ReportEvaluationRead | None:
+    if await db.scalar(select(ResearchReport.id).where(ResearchReport.id == report_id)) is None:
+        raise HTTPException(status_code=404, detail=f"Research report {report_id} was not found")
+    evaluation = await db.scalar(
+        select(ReportEvaluation).where(ReportEvaluation.report_id == report_id)
+    )
+    return _report_evaluation_read(evaluation) if evaluation else None
+
+
+@router.post(
+    "/reports/{report_id}/evaluate",
+    response_model=ReportEvaluationRead,
+)
+async def evaluate_report(
+    report_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    force: bool = False,
+) -> ReportEvaluationRead:
+    report = await db.scalar(select(ResearchReport).where(ResearchReport.id == report_id))
+    if report is None:
+        raise HTTPException(status_code=404, detail=f"Research report {report_id} was not found")
+    existing = await db.scalar(
+        select(ReportEvaluation).where(ReportEvaluation.report_id == report_id)
+    )
+    if existing is not None and not force:
+        return _report_evaluation_read(existing)
+
+    claims_result = await db.execute(
+        select(ResearchClaim)
+        .where(ResearchClaim.report_id == report_id)
+        .order_by(ResearchClaim.claim_index)
+    )
+    claims = list(claims_result.scalars().all())
+    if not claims:
+        raise HTTPException(status_code=409, detail="Extract atomic claims before scoring the report")
+    claim_ids = [claim.id for claim in claims]
+    evaluations_result = await db.execute(
+        select(ClaimEvaluation).where(ClaimEvaluation.claim_id.in_(claim_ids))
+    )
+    evaluations = list(evaluations_result.scalars().all())
+    temporal_evaluation = await db.scalar(
+        select(ReportTemporalEvaluation).where(
+            ReportTemporalEvaluation.report_id == report_id
+        )
+    )
+    available_pairs = {
+        (evaluation.claim_id, evaluation.evaluation_type) for evaluation in evaluations
+    }
+    required_pairs: set[tuple[int, str]] = set()
+    for claim in claims:
+        if is_numeric_claim(claim.claim_type, claim.claim_text):
+            required_pairs.add((claim.id, "NUMERIC"))
+        if claim.claim_type != "NUMERIC":
+            required_pairs.add((claim.id, "CITATION"))
+        if is_contradiction_eligible(claim.claim_type, claim.claim_text):
+            required_pairs.add((claim.id, "CONTRADICTION"))
+    missing_pairs = required_pairs - available_pairs
+    if missing_pairs:
+        missing_types = ", ".join(sorted({item[1].lower() for item in missing_pairs}))
+        raise HTTPException(
+            status_code=409,
+            detail=f"Complete the missing {missing_types} claim checks before scoring the report",
+        )
+
+    score = calculate_report_score(
+        claims=[
+            ScoringClaim(claim_id=claim.id, citation_ids=claim.citation_ids)
+            for claim in claims
+        ],
+        evaluations=[
+            ScoringEvaluation(
+                claim_id=evaluation.claim_id,
+                evaluation_type=evaluation.evaluation_type,
+                status=evaluation.status,
+            )
+            for evaluation in evaluations
+        ],
+        temporal_integrity_score=(
+            float(temporal_evaluation.score)
+            if temporal_evaluation is not None and temporal_evaluation.score is not None
+            else None
+        ),
+    )
+    if existing is not None:
+        await db.delete(existing)
+    report_evaluation = ReportEvaluation(
+        report_id=report_id,
+        **score.__dict__,
+        scoring_version=SCORING_VERSION,
+    )
+    db.add(report_evaluation)
+    await db.commit()
+    await db.refresh(report_evaluation)
+    return _report_evaluation_read(report_evaluation)

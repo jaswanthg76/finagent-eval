@@ -27,6 +27,7 @@ class ClaimEvaluation(Base):
     confidence: Mapped[float] = mapped_column(Numeric(5, 4))
     reason: Mapped[str] = mapped_column(Text)
     evidence_ids: Mapped[list[str]] = mapped_column(JSONB)
+    evaluated_evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
     claimed_values: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
     calculated_values: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
     verifier_version: Mapped[str] = mapped_column(String(50))
