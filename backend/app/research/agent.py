@@ -7,10 +7,9 @@ from openai import APIConnectionError, APIStatusError, AsyncOpenAI, RateLimitErr
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.core.config import settings
-from app.research.hybrid import METRIC_TERMS
+from app.research.metrics import ALLOWED_METRICS
 
 ToolExecutor = Callable[[str, dict[str, object]], Awaitable[dict[str, object]]]
-ALLOWED_METRICS = tuple(metric_name for metric_name, _ in METRIC_TERMS)
 
 
 class AgentConfigurationError(RuntimeError):
@@ -98,28 +97,32 @@ def _system_prompt(
     ticker: str,
     as_of_date: str | None,
     form: str | None,
-    required_metric_names: list[str],
 ) -> str:
     scope = [f"company={ticker}"]
     if as_of_date:
         scope.append(f"filed_on_or_before={as_of_date}")
     if form:
         scope.append(f"form={form}")
-    required_metrics = ", ".join(required_metric_names) or "none"
     return f"""You are a careful SEC financial research agent.
 Scope: {', '.join(scope)}. The application enforces this scope; never ask tools for another company.
-Metrics explicitly requested by the question: {required_metrics}.
 
-You must use at least one provided tool before answering. Use filing search for qualitative claims
-and metric lookup for exact figures. You may use both. Base every factual claim only on returned
-evidence. Cite filing evidence as [F1], [F2] and metric evidence as [M1], [M2], using the exact IDs
-in tool results. Cite multiple items separately as [M1][M2], never as [M1, M2]. Never invent a
-value, period, source, or citation. If evidence is insufficient, say
-so plainly. Use deterministic_comparisons for arithmetic; do not recalculate them. Describe metric
-periods by their exact start/end dates and do not infer fiscal-year labels. Treat a movement as a
-driver only when narrative evidence explicitly says it drove or caused the movement. Keep the final
-answer concise and decision-useful. Do not include a separate sources section because the
-application renders sources independently.
+Determine what evidence is necessary to answer the question. Use get_financial_metrics when exact
+financial values, period comparisons, growth rates, margins, balances, or other structured financial
+facts are needed. Use search_filings when management explanations, drivers, risks, strategy, causes,
+outlook, or other narrative evidence are needed. A question may require multiple tools and multiple
+calls. Do not infer a financial value from narrative text when structured metric evidence is
+available. Do not perform arithmetic yourself when deterministic_comparisons are returned by a tool.
+When explaining a metric comparison, use narrative evidence from the filing that contains the newest
+metric evidence and verify that the narrative discusses the same period before calling it a driver.
+
+You must use at least one provided tool before answering. Base every factual claim only on returned
+evidence. Cite filing evidence as [F1], [F2] and metric evidence as [M1], [M2], using the exact IDs in
+tool results. Cite multiple items separately as [M1][M2], never as [M1, M2]. Never invent a value,
+period, source, or citation. If evidence is insufficient, say so plainly. Describe metric periods by
+their exact start/end dates and do not infer fiscal-year labels. Treat a movement as a driver only
+when narrative evidence explicitly says it drove or caused the movement. Keep the final answer
+concise and decision-useful. Do not include a separate sources section because the application
+renders sources independently.
 """
 
 
@@ -144,55 +147,24 @@ class GroqResearchAgent:
         question: str,
         as_of_date: str | None,
         form: str | None,
-        required_metric_names: list[str],
         execute_tool: ToolExecutor,
     ) -> tuple[str, list[dict[str, object]]]:
         executed_calls: list[dict[str, object]] = []
         messages: list[dict[str, Any]] = [
             {
                 "role": "system",
-                "content": _system_prompt(ticker, as_of_date, form, required_metric_names),
+                "content": _system_prompt(ticker, as_of_date, form),
             },
             {"role": "user", "content": question},
         ]
-        if required_metric_names:
-            preload_arguments: dict[str, object] = {
-                "metric_names": required_metric_names,
-                "limit_per_metric": 2,
-            }
-            preloaded_metrics = await execute_tool(
-                "get_financial_metrics",
-                preload_arguments,
-            )
-            executed_calls.append(
-                {"name": "get_financial_metrics", "arguments": preload_arguments}
-            )
-            messages.append(
-                {
-                    "role": "system",
-                    "content": (
-                        "The application preloaded the required structured metric evidence below. "
-                        "Use its evidence IDs in citations. Call search_filings if the question asks "
-                        "for causes, risks, explanations, or other qualitative context.\n"
-                        + json.dumps(preloaded_metrics, default=str)
-                    ),
-                }
-            )
-        available_tools = (
-            [tool for tool in TOOL_SCHEMAS if tool["function"]["name"] == "search_filings"]
-            if required_metric_names
-            else TOOL_SCHEMAS
-        )
 
         try:
             for round_index in range(4):
                 response = await self._client.chat.completions.create(
                     model=settings.ai_model,
                     messages=messages,
-                    tools=available_tools,
-                    tool_choice=(
-                        "auto" if round_index > 0 or required_metric_names else "required"
-                    ),
+                    tools=TOOL_SCHEMAS,
+                    tool_choice="required" if round_index == 0 else "auto",
                     temperature=0,
                     max_completion_tokens=700,
                 )

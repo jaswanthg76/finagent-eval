@@ -56,7 +56,6 @@ from app.research.claims import (
     ClaimExtractionError,
     GroqClaimExtractor,
 )
-from app.research.hybrid import identify_metric_names
 from app.schemas.research import (
     CitationVerificationResult,
     ClaimEvaluationRead,
@@ -291,17 +290,25 @@ async def generate_research_answer(
     async def execute_tool(name: str, arguments: dict[str, object]) -> dict[str, object]:
         if name == "search_filings":
             filed_after: date | None = None
-            if prefer_recent_filings:
+            accession_numbers: set[str] | None = None
+            if metrics:
+                filed_after = max(metric.filing_date for metric in metrics)
+                accession_numbers = {
+                    metric.accession_number
+                    for metric in metrics
+                    if metric.filing_date == filed_after
+                }
+            elif prefer_recent_filings:
                 filing_dates = select(Filing.filing_date).where(Filing.company_id == company.id)
                 if request.form is not None:
                     filing_dates = filing_dates.where(Filing.form == request.form)
                 if request.as_of_date is not None:
                     filing_dates = filing_dates.where(Filing.filing_date <= request.as_of_date)
                 date_result = await db.execute(
-                    filing_dates.distinct().order_by(Filing.filing_date.desc()).limit(4)
+                    filing_dates.distinct().order_by(Filing.filing_date.desc()).limit(1)
                 )
                 recent_dates = list(date_result.scalars().all())
-                filed_after = min(recent_dates) if recent_dates else None
+                filed_after = recent_dates[0] if recent_dates else None
             results = await _semantic_search_for_company(
                 company=company,
                 query=str(arguments["query"]),
@@ -311,6 +318,7 @@ async def generate_research_answer(
                 limit=int(arguments["limit"]),
                 filed_after=filed_after,
                 section_name="Management's Discussion and Analysis" if prefer_mda else None,
+                accession_numbers=accession_numbers,
             )
             items: list[dict[str, object]] = []
             for result in results:
@@ -396,7 +404,6 @@ async def generate_research_answer(
             question=request.question,
             as_of_date=request.as_of_date.isoformat() if request.as_of_date else None,
             form=request.form,
-            required_metric_names=identify_metric_names(request.question),
             execute_tool=execute_tool,
         )
     except AgentConfigurationError as error:

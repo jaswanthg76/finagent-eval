@@ -93,16 +93,16 @@ this constrained retrieval path.
 ### Route preparation
 
 1. `_company_or_404()` fixes the company from the requested ticker.
-2. `identify_metric_names()` uses the canonical metric vocabulary to detect structured facts needed
-   by the question.
-3. Keyword heuristics decide whether to prefer recent filings or MD&A sections.
-4. The route defines a request-scoped `execute_tool()` closure. The model cannot call SQL directly.
+2. Keyword heuristics decide whether to prefer recent filings or MD&A sections.
+3. The route defines a request-scoped `execute_tool()` closure. The model cannot call SQL directly.
 
 ### Controlled tools
 
 `execute_tool("search_filings", ...)` calls `_semantic_search_for_company()` with backend-enforced
-company, form, and cutoff filters. Returned chunks receive stable report-local IDs `F1`, `F2`, and
-so on.
+company, form, and cutoff filters. Requests for the latest evidence are restricted to the newest
+eligible filing; after metrics have been retrieved, narrative search is pinned to the accession that
+contains the newest metric facts. Returned chunks receive stable report-local IDs `F1`, `F2`, and so
+on.
 
 `execute_tool("get_financial_metrics", ...)` calls `_metric_evidence()`. Returned facts receive
 report-local IDs `M1`, `M2`, and so on. Python calculates absolute and percentage comparisons for
@@ -112,8 +112,9 @@ compatible periods; the model receives those calculations instead of doing arith
 
 `GroqResearchAgent.answer()` in `app.research.agent`:
 
-1. Builds the system prompt with ticker, cutoff, form, and required metrics.
-2. Preloads two facts for each recognized metric.
+1. Builds the system prompt with ticker, cutoff, and form.
+2. Requires the model to select a tool on the first round and keeps both controlled tools available
+   on later rounds.
 3. Allows at most four validated tool-call rounds.
 4. Returns invalid tool calls as structured tool errors for possible repair.
 5. Forces a final answer after the bounded loop if the model has not finished.

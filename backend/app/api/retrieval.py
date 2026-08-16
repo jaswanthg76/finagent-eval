@@ -132,6 +132,7 @@ async def _semantic_search_for_company(
     limit: int,
     filed_after: date | None = None,
     section_name: str | None = None,
+    accession_numbers: set[str] | None = None,
 ) -> list[SemanticSearchResult]:
     available_statement = (
         select(func.count())
@@ -188,6 +189,8 @@ async def _semantic_search_for_company(
         statement = statement.where(Filing.form == form.upper())
     if section_name is not None:
         statement = statement.where(FilingSection.section_name == section_name)
+    if accession_numbers is not None:
+        statement = statement.where(Filing.accession_number.in_(accession_numbers))
 
     result = await db.execute(statement.order_by(distance).limit(limit))
     return [

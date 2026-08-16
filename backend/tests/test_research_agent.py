@@ -60,7 +60,6 @@ async def test_groq_agent_executes_validated_tool_then_returns_answer() -> None:
         question="How did revenue change?",
         as_of_date=None,
         form="10-Q",
-        required_metric_names=[],
         execute_tool=execute_tool,
     )
 
@@ -79,27 +78,54 @@ async def test_groq_agent_executes_validated_tool_then_returns_answer() -> None:
     assert create.await_args_list[1].kwargs["tool_choice"] == "auto"
 
 
-async def test_groq_agent_preloads_explicit_metrics_before_model_call() -> None:
+async def test_groq_agent_keeps_both_tools_available_after_first_call() -> None:
+    metric_call = SimpleNamespace(
+        id="call_1",
+        function=SimpleNamespace(
+            name="get_financial_metrics",
+            arguments=json.dumps({"metric_names": ["Revenue"], "limit_per_metric": 2}),
+        ),
+    )
+    filing_call = SimpleNamespace(
+        id="call_2",
+        function=SimpleNamespace(
+            name="search_filings",
+            arguments=json.dumps({"query": "revenue drivers", "limit": 3}),
+        ),
+    )
     create = AsyncMock(
-        return_value=completion(FakeMessage(content="Revenue was $10 [M1].", tool_calls=[]))
+        side_effect=[
+            completion(FakeMessage(tool_calls=[metric_call])),
+            completion(FakeMessage(tool_calls=[filing_call])),
+            completion(FakeMessage(content="Revenue changed because of demand [M1][F1].", tool_calls=[])),
+        ]
     )
     client = Mock()
     client.chat.completions.create = create
-    execute_tool = AsyncMock(return_value={"metric_evidence": [{"evidence_id": "M1"}]})
+    execute_tool = AsyncMock(
+        side_effect=[
+            {"metric_evidence": [{"evidence_id": "M1"}]},
+            {"filing_evidence": [{"evidence_id": "F1"}]},
+        ]
+    )
 
     answer, calls = await GroqResearchAgent(client=client).answer(
         ticker="NVDA",
-        question="What was revenue?",
+        question="How did revenue change, and why?",
         as_of_date=None,
         form=None,
-        required_metric_names=["Revenue"],
         execute_tool=execute_tool,
     )
 
-    assert answer == "Revenue was $10 [M1]."
-    assert calls[0]["name"] == "get_financial_metrics"
-    execute_tool.assert_awaited_once_with(
+    assert answer == "Revenue changed because of demand [M1][F1]."
+    assert [call["name"] for call in calls] == [
         "get_financial_metrics",
-        {"metric_names": ["Revenue"], "limit_per_metric": 2},
-    )
-    assert create.await_args.kwargs["tool_choice"] == "auto"
+        "search_filings",
+    ]
+    for request in create.await_args_list[:2]:
+        assert {tool["function"]["name"] for tool in request.kwargs["tools"]} == {
+            "get_financial_metrics",
+            "search_filings",
+        }
+    assert create.await_args_list[0].kwargs["tool_choice"] == "required"
+    assert create.await_args_list[1].kwargs["tool_choice"] == "auto"
