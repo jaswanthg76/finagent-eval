@@ -1,14 +1,38 @@
 import json
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-import httpx
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI, RateLimitError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from app.core.ai import AIClientConfigurationError, create_ai_client
 from app.core.config import settings
 
 ToolExecutor = Callable[[str, dict[str, object]], Awaitable[dict[str, object]]]
+_CITATION_PATTERN = re.compile(r"\[([FM]\d+)\]", re.IGNORECASE)
+_SENTENCE_PATTERN = re.compile(r"(?<=[.!?])\s+|\n+")
+_CLAUSE_PATTERN = re.compile(
+    r";\s+|,\s+(?=(?:as evidenced|with|while|whereas|because|driven|caused|and|but|which)\b)",
+    re.IGNORECASE,
+)
+_COMPARISON_PATTERN = re.compile(
+    r"\b(compared(?:\s+to|\s+with)?|versus|vs\.?|year[- ]over[- ]year|sequential(?:ly)?|"
+    r"increase[ds]?|decrease[ds]?|grew|growth|declined?|fell|rose|change[ds]?)\b",
+    re.IGNORECASE,
+)
+_INCREASE_PATTERN = re.compile(r"\b(increase[ds]?|grew|growth|rose|higher)\b", re.IGNORECASE)
+_DECREASE_PATTERN = re.compile(r"\b(decrease[ds]?|declined?|fell|lower)\b", re.IGNORECASE)
+_CAUSAL_PATTERN = re.compile(
+    r"\b(because|caused|driven by|due to|attributable to|resulted from)\b",
+    re.IGNORECASE,
+)
+_INSUFFICIENT_PATTERN = re.compile(
+    r"\b(insufficient evidence|evidence (?:is|was) insufficient|cannot determine|"
+    r"could not determine|not enough evidence)\b",
+    re.IGNORECASE,
+)
+_MAX_REPAIR_ATTEMPTS = 2
 
 
 class AgentConfigurationError(RuntimeError):
@@ -99,6 +123,56 @@ def validate_tool_arguments(name: str, arguments: dict[str, object]) -> dict[str
     raise ValueError(f"Unknown research tool: {name}")
 
 
+def validate_research_answer(answer: str, available_evidence_ids: set[str]) -> list[str]:
+    violations: list[str] = []
+    sentences = [sentence.strip() for sentence in _SENTENCE_PATTERN.split(answer) if sentence.strip()]
+    for index, sentence in enumerate(sentences, start=1):
+        citation_ids = [match.upper() for match in _CITATION_PATTERN.findall(sentence)]
+        unknown_ids = sorted(set(citation_ids) - available_evidence_ids)
+        if unknown_ids:
+            violations.append(
+                f"Sentence {index} cites unavailable evidence: {', '.join(unknown_ids)}."
+            )
+        clauses = [clause.strip() for clause in _CLAUSE_PATTERN.split(sentence) if clause.strip()]
+        for clause_index, clause in enumerate(clauses, start=1):
+            if not _CITATION_PATTERN.search(clause) and not _INSUFFICIENT_PATTERN.search(clause):
+                violations.append(
+                    f"Sentence {index}, clause {clause_index} makes an uncited factual claim."
+                )
+        metric_ids = {item for item in citation_ids if item.startswith("M")}
+        if metric_ids and _COMPARISON_PATTERN.search(sentence) and len(metric_ids) < 2:
+            violations.append(
+                f"Sentence {index} makes a metric comparison without two metric citations."
+            )
+        if (
+            citation_ids
+            and all(item.startswith("M") for item in citation_ids)
+            and _CAUSAL_PATTERN.search(sentence)
+        ):
+            violations.append(
+                f"Sentence {index} makes a causal claim using only metric evidence."
+            )
+        if _INCREASE_PATTERN.search(sentence) and _DECREASE_PATTERN.search(sentence):
+            violations.append(f"Sentence {index} contains conflicting direction language.")
+    return violations
+
+
+def _collect_evidence_ids(value: object) -> set[str]:
+    evidence_ids: set[str] = set()
+    if isinstance(value, dict):
+        evidence_id = value.get("evidence_id")
+        if isinstance(evidence_id, str) and re.fullmatch(
+            r"[FM]\d+", evidence_id, re.IGNORECASE
+        ):
+            evidence_ids.add(evidence_id.upper())
+        for nested_value in value.values():
+            evidence_ids.update(_collect_evidence_ids(nested_value))
+    elif isinstance(value, list):
+        for nested_value in value:
+            evidence_ids.update(_collect_evidence_ids(nested_value))
+    return evidence_ids
+
+
 def _system_prompt(
     ticker: str,
     as_of_date: str | None,
@@ -144,15 +218,10 @@ include a separate sources section because the application renders sources indep
 class GroqResearchAgent:
     def __init__(self, client: AsyncOpenAI | None = None) -> None:
         if client is None:
-            if settings.groq_api_key is None:
-                raise AgentConfigurationError(
-                    "GROQ_API_KEY is not configured. Add it to backend/.env and restart the API."
-                )
-            client = AsyncOpenAI(
-                api_key=settings.groq_api_key.get_secret_value(),
-                base_url="https://api.groq.com/openai/v1",
-                timeout=httpx.Timeout(90.0),
-            )
+            try:
+                client = create_ai_client()
+            except AIClientConfigurationError as error:
+                raise AgentConfigurationError(str(error)) from error
         self._client = client
 
     async def answer(
@@ -165,6 +234,7 @@ class GroqResearchAgent:
         execute_tool: ToolExecutor,
     ) -> tuple[str, list[dict[str, object]]]:
         executed_calls: list[dict[str, object]] = []
+        available_evidence_ids: set[str] = set()
         messages: list[dict[str, Any]] = [
             {
                 "role": "system",
@@ -189,8 +259,12 @@ class GroqResearchAgent:
                 if not tool_calls:
                     answer = (message.content or "").strip()
                     if not answer:
-                        raise AgentGenerationError("Groq returned an empty research answer")
-                    return answer, executed_calls
+                        raise AgentGenerationError("The AI provider returned an empty research answer")
+                    return await self._repair_answer(
+                        answer=answer,
+                        messages=messages,
+                        available_evidence_ids=available_evidence_ids,
+                    ), executed_calls
 
                 for tool_call in tool_calls:
                     name = tool_call.function.name
@@ -199,6 +273,7 @@ class GroqResearchAgent:
                         arguments = validate_tool_arguments(name, raw_arguments)
                         result = await execute_tool(name, arguments)
                         executed_calls.append({"name": name, "arguments": arguments})
+                        available_evidence_ids.update(_collect_evidence_ids(result))
                     except (json.JSONDecodeError, ValidationError, ValueError) as error:
                         result = {"error": f"Invalid tool call: {error}"}
                     messages.append(
@@ -217,17 +292,76 @@ class GroqResearchAgent:
                 max_completion_tokens=700,
             )
         except RateLimitError as error:
-            raise AgentGenerationError("Groq free-tier rate limit exceeded; try again later") from error
+            raise AgentGenerationError(
+                f"{settings.ai_provider.title()} rate limit exceeded; try again later"
+            ) from error
         except APIConnectionError as error:
-            raise AgentGenerationError("Could not reach the Groq API") from error
+            raise AgentGenerationError(f"Could not reach the {settings.ai_provider} API") from error
         except APIStatusError as error:
             if error.status_code == 413:
                 raise AgentGenerationError(
-                    "Groq rejected the evidence batch as too large for the current free-plan limit"
+                    f"{settings.ai_provider.title()} rejected the evidence batch as too large"
                 ) from error
-            raise AgentGenerationError(f"Groq returned HTTP {error.status_code}") from error
+            raise AgentGenerationError(
+                f"{settings.ai_provider.title()} returned HTTP {error.status_code}"
+            ) from error
 
         answer = (final_response.choices[0].message.content or "").strip()
         if not answer:
-            raise AgentGenerationError("Groq returned an empty research answer")
-        return answer, executed_calls
+            raise AgentGenerationError("The AI provider returned an empty research answer")
+        return await self._repair_answer(
+            answer=answer,
+            messages=[
+                *messages,
+                final_response.choices[0].message.model_dump(exclude_none=True),
+            ],
+            available_evidence_ids=available_evidence_ids,
+        ), executed_calls
+
+    async def _repair_answer(
+        self,
+        *,
+        answer: str,
+        messages: list[dict[str, Any]],
+        available_evidence_ids: set[str],
+    ) -> str:
+        violations = validate_research_answer(answer, available_evidence_ids)
+        if not violations:
+            return answer
+
+        repair_instruction = """Revise the research answer to fix every validation failure below.
+Use only evidence already returned by the tools. Do not call tools, invent evidence, or add a sources
+section. Remove any claim that cannot be supported. Preserve exact citation syntax and ensure every
+factual sentence has citations. For metric comparisons, cite both metric periods. For causes or
+management views, include filing evidence. Put citations directly after each factual clause instead
+of relying on a citation at the end of a compound sentence. Resolve contradictory direction wording.
+
+Validation failures:
+"""
+        repair_messages = list(messages)
+        for _ in range(_MAX_REPAIR_ATTEMPTS):
+            repair_prompt = repair_instruction + "\n".join(
+                f"- {violation}" for violation in violations
+            )
+            response = await self._client.chat.completions.create(
+                model=settings.ai_model,
+                messages=[*repair_messages, {"role": "user", "content": repair_prompt}],
+                tool_choice="none",
+                temperature=0,
+                max_completion_tokens=700,
+            )
+            repaired_answer = (response.choices[0].message.content or "").strip()
+            violations = validate_research_answer(repaired_answer, available_evidence_ids)
+            if repaired_answer and not violations:
+                return repaired_answer
+            repair_messages.extend(
+                [
+                    {"role": "user", "content": repair_prompt},
+                    {"role": "assistant", "content": repaired_answer},
+                ]
+            )
+
+        details = "; ".join(violations or ["The AI provider returned an empty repair"])
+        raise AgentGenerationError(
+            f"Research answer failed pre-save evidence validation after repair: {details}"
+        )

@@ -3,10 +3,10 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
-import httpx
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI, RateLimitError
 from pydantic import BaseModel, Field, ValidationError
 
+from app.core.ai import AIClientConfigurationError, create_ai_client
 from app.core.config import settings
 from app.evaluation.evidence import relevant_excerpt
 
@@ -87,15 +87,10 @@ def compact_filing_evidence(
 class GroqCitationEvaluator:
     def __init__(self, client: AsyncOpenAI | None = None) -> None:
         if client is None:
-            if settings.groq_api_key is None:
-                raise CitationEvaluationConfigurationError(
-                    "GROQ_API_KEY is not configured. Add it to backend/.env and restart the API."
-                )
-            client = AsyncOpenAI(
-                api_key=settings.groq_api_key.get_secret_value(),
-                base_url="https://api.groq.com/openai/v1",
-                timeout=httpx.Timeout(90.0),
-            )
+            try:
+                client = create_ai_client()
+            except AIClientConfigurationError as error:
+                raise CitationEvaluationConfigurationError(str(error)) from error
         self._client = client
 
     async def evaluate(
@@ -171,27 +166,33 @@ Rules:
             )
         except RateLimitError as error:
             raise CitationEvaluationError(
-                "Groq free-tier rate limit exceeded; try citation verification again later"
+                f"{settings.ai_provider.title()} rate limit exceeded; try citation verification again later"
             ) from error
         except APIConnectionError as error:
-            raise CitationEvaluationError("Could not reach the Groq API") from error
+            raise CitationEvaluationError(
+                f"Could not reach the {settings.ai_provider} API"
+            ) from error
         except APIStatusError as error:
             if error.status_code == 413:
                 raise CitationEvaluationError(
-                    "Groq rejected the citation evidence batch as too large for the free plan"
+                    f"{settings.ai_provider.title()} rejected the citation evidence batch as too large"
                 ) from error
-            raise CitationEvaluationError(f"Groq returned HTTP {error.status_code}") from error
+            raise CitationEvaluationError(
+                f"{settings.ai_provider.title()} returned HTTP {error.status_code}"
+            ) from error
 
         content = response.choices[0].message.content or ""
         try:
             payload = CitationEvaluationPayload.model_validate_json(content)
         except ValidationError as error:
-            raise CitationEvaluationError("Groq returned an invalid citation-evaluation payload") from error
+            raise CitationEvaluationError(
+                "The AI provider returned an invalid citation-evaluation payload"
+            ) from error
 
         returned_ids = [item.claim_id for item in payload.evaluations]
         if len(returned_ids) != len(set(returned_ids)) or set(returned_ids) != expected_ids:
             raise CitationEvaluationError(
-                "Groq citation evaluation did not return exactly the requested claim IDs"
+                "Citation evaluation did not return exactly the requested claim IDs"
             )
         for item in payload.evaluations:
             allowed_ids = allowed_evidence_by_claim[item.claim_id]
@@ -204,7 +205,7 @@ Rules:
                 or not reason_ids.issubset(allowed_ids)
             ):
                 raise CitationEvaluationError(
-                    "Groq citation evaluation referenced unknown evidence IDs"
+                    "Citation evaluation referenced unknown evidence IDs"
                 )
         return sorted(payload.evaluations, key=lambda item: next(
             index for index, claim in enumerate(claims) if claim.claim_id == item.claim_id

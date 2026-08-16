@@ -2,10 +2,10 @@ import json
 from dataclasses import dataclass
 from typing import Any, Literal
 
-import httpx
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI, RateLimitError
 from pydantic import BaseModel, Field, ValidationError
 
+from app.core.ai import AIClientConfigurationError, create_ai_client
 from app.core.config import settings
 from app.evaluation.evidence import relevant_excerpt
 
@@ -108,15 +108,10 @@ def compact_counterevidence(
 class GroqContradictionEvaluator:
     def __init__(self, client: AsyncOpenAI | None = None) -> None:
         if client is None:
-            if settings.groq_api_key is None:
-                raise ContradictionEvaluationConfigurationError(
-                    "GROQ_API_KEY is not configured. Add it to backend/.env and restart the API."
-                )
-            client = AsyncOpenAI(
-                api_key=settings.groq_api_key.get_secret_value(),
-                base_url="https://api.groq.com/openai/v1",
-                timeout=httpx.Timeout(90.0),
-            )
+            try:
+                client = create_ai_client()
+            except AIClientConfigurationError as error:
+                raise ContradictionEvaluationConfigurationError(str(error)) from error
         self._client = client
 
     async def evaluate(
@@ -192,17 +187,19 @@ Rules:
             )
         except RateLimitError as error:
             raise ContradictionEvaluationError(
-                "Groq free-tier rate limit exceeded; try contradiction checking again later"
+                f"{settings.ai_provider.title()} rate limit exceeded; try contradiction checking again later"
             ) from error
         except APIConnectionError as error:
-            raise ContradictionEvaluationError("Could not reach the Groq API") from error
+            raise ContradictionEvaluationError(
+                f"Could not reach the {settings.ai_provider} API"
+            ) from error
         except APIStatusError as error:
             if error.status_code == 413:
                 raise ContradictionEvaluationError(
-                    "Groq rejected the contradiction-evidence batch as too large for the free plan"
+                    f"{settings.ai_provider.title()} rejected the contradiction batch as too large"
                 ) from error
             raise ContradictionEvaluationError(
-                f"Groq returned HTTP {error.status_code}"
+                f"{settings.ai_provider.title()} returned HTTP {error.status_code}"
             ) from error
 
         content = response.choices[0].message.content or ""
@@ -210,18 +207,18 @@ Rules:
             payload = ContradictionEvaluationPayload.model_validate_json(content)
         except ValidationError as error:
             raise ContradictionEvaluationError(
-                "Groq returned an invalid contradiction-evaluation payload"
+                "The AI provider returned an invalid contradiction-evaluation payload"
             ) from error
 
         returned_ids = [item.claim_id for item in payload.evaluations]
         if len(returned_ids) != len(set(returned_ids)) or set(returned_ids) != expected_ids:
             raise ContradictionEvaluationError(
-                "Groq contradiction evaluation did not return exactly the requested claim IDs"
+                "Contradiction evaluation did not return exactly the requested claim IDs"
             )
         for item in payload.evaluations:
             if not set(item.evidence_ids).issubset(allowed_evidence_by_claim[item.claim_id]):
                 raise ContradictionEvaluationError(
-                    "Groq contradiction evaluation referenced unknown evidence IDs"
+                    "Contradiction evaluation referenced unknown evidence IDs"
                 )
         claim_order = {claim.claim_id: index for index, claim in enumerate(claims)}
         return sorted(payload.evaluations, key=lambda item: claim_order[item.claim_id])

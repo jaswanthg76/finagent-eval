@@ -1,9 +1,9 @@
 from typing import Any
 
-import httpx
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI, RateLimitError
 from pydantic import ValidationError
 
+from app.core.ai import AIClientConfigurationError, create_ai_client
 from app.core.config import settings
 from app.schemas.research import ExtractedClaim, ExtractedClaimsPayload
 
@@ -21,15 +21,10 @@ class ClaimExtractionError(RuntimeError):
 class GroqClaimExtractor:
     def __init__(self, client: AsyncOpenAI | None = None) -> None:
         if client is None:
-            if settings.groq_api_key is None:
-                raise ClaimExtractionConfigurationError(
-                    "GROQ_API_KEY is not configured. Add it to backend/.env and restart the API."
-                )
-            client = AsyncOpenAI(
-                api_key=settings.groq_api_key.get_secret_value(),
-                base_url="https://api.groq.com/openai/v1",
-                timeout=httpx.Timeout(90.0),
-            )
+            try:
+                client = create_ai_client()
+            except AIClientConfigurationError as error:
+                raise ClaimExtractionConfigurationError(str(error)) from error
         self._client = client
 
     async def extract(
@@ -71,18 +66,22 @@ Rules:
             )
         except RateLimitError as error:
             raise ClaimExtractionError(
-                "Groq free-tier rate limit exceeded; try claim extraction again later"
+                f"{settings.ai_provider.title()} rate limit exceeded; try claim extraction again later"
             ) from error
         except APIConnectionError as error:
-            raise ClaimExtractionError("Could not reach the Groq API") from error
+            raise ClaimExtractionError(f"Could not reach the {settings.ai_provider} API") from error
         except APIStatusError as error:
-            raise ClaimExtractionError(f"Groq returned HTTP {error.status_code}") from error
+            raise ClaimExtractionError(
+                f"{settings.ai_provider.title()} returned HTTP {error.status_code}"
+            ) from error
 
         content = response.choices[0].message.content or ""
         try:
             payload = ExtractedClaimsPayload.model_validate_json(content)
         except ValidationError as error:
-            raise ClaimExtractionError("Groq returned an invalid claim-extraction payload") from error
+            raise ClaimExtractionError(
+                "The AI provider returned an invalid claim-extraction payload"
+            ) from error
 
         normalized: list[ExtractedClaim] = []
         seen_text: set[str] = set()

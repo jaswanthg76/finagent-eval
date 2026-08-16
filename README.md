@@ -1375,9 +1375,9 @@ DATABASE_URL=
 
 REDIS_URL=
 
-AI_PROVIDER=groq
-AI_MODEL=llama-3.3-70b-versatile
-GROQ_API_KEY=
+AI_PROVIDER=gemini
+AI_MODEL=gemini-3.5-flash-lite
+GEMINI_API_KEY=
 
 EMBEDDING_PROVIDER=local
 EMBEDDING_MODEL=jinaai/jina-embeddings-v2-small-en
@@ -1483,7 +1483,7 @@ It currently supports:
 - ingesting normalized SEC Company Facts / XBRL metrics,
 - generating local embeddings and searching filing chunks with pgvector,
 - hybrid retrieval of qualitative filing passages and quantitative facts,
-- a Groq-hosted research agent with controlled retrieval tools,
+- a Gemini-hosted research agent with controlled retrieval tools,
 - exact `ticker`, filing-form, and `as_of_date` filtering,
 - deterministic comparable-period selection and financial calculations,
 - compact two-fact metric preloads for comparable-period questions on free-tier model limits,
@@ -1539,7 +1539,7 @@ claiming success.
 | --- | --- | --- |
 | Request execution | Ingestion, generation, and evaluation run inside HTTP requests. | Move long operations to durable workers with job state, retries, cancellation, and dead-letter handling. |
 | Research tool loop | The agent gets at most four tool-call rounds and is then forced to produce a final answer from evidence already retrieved. | Add token- and cost-aware orchestration with explicit completion criteria and resumable jobs. |
-| Model provider | Research, extraction, and semantic evaluation currently use Groq-compatible chat completions even though provider metadata is stored with reports. | Introduce provider interfaces and implementations for each configured provider, with capability checks at startup. |
+| Model provider | Research, extraction, and semantic evaluation use a shared OpenAI-compatible client configured for Gemini or Groq. | Add startup capability checks for each configured provider. |
 | Provider failures | Configuration, rate-limit, connection, malformed-output, and provider HTTP errors are returned to the caller; there is no automatic model failover. | Add bounded exponential retries, provider/model fallback, circuit breakers, and idempotent job resumption. |
 | Metric routing | Metric names are detected with a canonical keyword map, and matching questions preload only two comparable facts per metric to fit free-tier limits. | Add a versioned financial concept ontology, better period intent parsing, and budget-aware retrieval of all relevant comparable facts. |
 | Filing routing | Recent-result and MD&A preferences use question keywords such as `latest`, `why`, and `driver`. | Replace the heuristics with a tested query planner that selects forms, periods, sections, and retrieval strategies explicitly. |

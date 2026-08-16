@@ -12,8 +12,9 @@ class Settings(BaseSettings):
     frontend_url: str = "http://localhost:5173"
     sec_user_agent: str = "FinAgentEval/0.1"
     openai_api_key: SecretStr | None = None
-    ai_provider: Literal["groq", "ollama"] = "groq"
-    ai_model: str = "llama-3.3-70b-versatile"
+    ai_provider: Literal["gemini", "groq", "ollama"] = "gemini"
+    ai_model: str = "gemini-3.5-flash-lite"
+    gemini_api_key: SecretStr | None = None
     groq_api_key: SecretStr | None = None
     embedding_provider: Literal["local", "openai"] = "local"
     embedding_model: str = "jinaai/jina-embeddings-v2-small-en"
@@ -29,7 +30,7 @@ class Settings(BaseSettings):
             else "jinaai/jina-embeddings-v2-small-en"
         )
 
-    @field_validator("openai_api_key", "groq_api_key", mode="before")
+    @field_validator("openai_api_key", "gemini_api_key", "groq_api_key", mode="before")
     @classmethod
     def empty_api_key_is_unconfigured(cls, value: Any) -> Any:
         return value if value and str(value).strip() else None
