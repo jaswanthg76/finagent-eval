@@ -94,10 +94,8 @@ def test_research_aligns_filing_search_with_latest_metric_filing() -> None:
     )
     company_result = Mock()
     company_result.scalar_one_or_none.return_value = company
-    filing_dates_result = Mock()
-    filing_dates_result.scalars.return_value.all.return_value = [date(2026, 5, 20)]
     session = AsyncMock(spec=AsyncSession)
-    session.execute.side_effect = [company_result, filing_dates_result]
+    session.execute.return_value = company_result
 
     async def assign_database_values(report: ResearchReport) -> None:
         report.id = 21
@@ -157,7 +155,7 @@ def test_research_aligns_filing_search_with_latest_metric_filing() -> None:
 
     assert response.status_code == 200
     first_search, aligned_search = semantic_search.await_args_list
-    assert first_search.kwargs["filed_after"] == date(2026, 5, 20)
+    assert first_search.kwargs["filed_after"] is None
     assert first_search.kwargs["accession_numbers"] is None
     assert aligned_search.kwargs["filed_after"] == date(2026, 5, 20)
     assert aligned_search.kwargs["accession_numbers"] == {

@@ -267,7 +267,6 @@ async def _metric_evidence(
             )
     return evidence
 
-
 @router.post("", response_model=ResearchReportRead)
 async def generate_research_answer(
     request: ResearchRequest,
@@ -278,15 +277,6 @@ async def generate_research_answer(
     metrics: list[MetricEvidence] = []
     chunk_evidence_ids: dict[int, str] = {}
     metric_evidence_ids: dict[int, str] = {}
-    prefer_recent_filings = any(
-        term in request.question.lower()
-        for term in ("latest", "most recent", "currently", "current period", "recent")
-    )
-    prefer_mda = any(
-        term in request.question.lower()
-        for term in ("drove", "driver", "why", "cause", "explain", "management said")
-    )
-
     async def execute_tool(name: str, arguments: dict[str, object]) -> dict[str, object]:
         if name == "search_filings":
             filed_after: date | None = None
@@ -298,17 +288,6 @@ async def generate_research_answer(
                     for metric in metrics
                     if metric.filing_date == filed_after
                 }
-            elif prefer_recent_filings:
-                filing_dates = select(Filing.filing_date).where(Filing.company_id == company.id)
-                if request.form is not None:
-                    filing_dates = filing_dates.where(Filing.form == request.form)
-                if request.as_of_date is not None:
-                    filing_dates = filing_dates.where(Filing.filing_date <= request.as_of_date)
-                date_result = await db.execute(
-                    filing_dates.distinct().order_by(Filing.filing_date.desc()).limit(1)
-                )
-                recent_dates = list(date_result.scalars().all())
-                filed_after = recent_dates[0] if recent_dates else None
             results = await _semantic_search_for_company(
                 company=company,
                 query=str(arguments["query"]),
@@ -317,7 +296,7 @@ async def generate_research_answer(
                 form=request.form,
                 limit=int(arguments["limit"]),
                 filed_after=filed_after,
-                section_name="Management's Discussion and Analysis" if prefer_mda else None,
+                section_name=None,
                 accession_numbers=accession_numbers,
             )
             items: list[dict[str, object]] = []
@@ -331,7 +310,6 @@ async def generate_research_answer(
                 model_evidence["content"] = result.content[:3_500]
                 items.append({"evidence_id": evidence_id, **model_evidence})
             return {"filing_evidence": items}
-
         if name == "get_financial_metrics":
             results = await _metric_evidence(
                 company=company,
@@ -363,7 +341,6 @@ async def generate_research_answer(
                         "source_url": result.source_url,
                     }
                 )
-
             comparisons: list[dict[str, object]] = []
             by_name: dict[str, list[tuple[str, MetricEvidence]]] = {}
             for item, result in zip(items, results, strict=True):
@@ -395,9 +372,7 @@ async def generate_research_answer(
                 "metric_evidence": items,
                 "deterministic_comparisons": comparisons,
             }
-
         raise ValueError(f"Unknown research tool: {name}")
-
     try:
         answer, raw_tool_calls = await GroqResearchAgent().answer(
             ticker=company.ticker,
@@ -410,7 +385,6 @@ async def generate_research_answer(
         raise HTTPException(status_code=503, detail=str(error)) from error
     except AgentGenerationError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
-
     sources = [
         ResearchSource(
             evidence_id=f"M{index}",
