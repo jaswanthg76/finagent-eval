@@ -6,9 +6,14 @@ from unittest.mock import AsyncMock, Mock, patch
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.research import evaluate_report
 from app.core.database import get_db
 from app.main import app
+from app.models.claim_evaluation import ClaimEvaluation
 from app.models.company import Company
+from app.models.report_evaluation import ReportEvaluation
+from app.models.report_temporal_evaluation import ReportTemporalEvaluation
+from app.models.research_claim import ResearchClaim
 from app.models.research_report import ResearchReport
 from app.schemas.retrieval import MetricEvidence
 
@@ -193,3 +198,125 @@ def test_list_and_get_saved_research_reports() -> None:
     detail = detail_response.json()
     assert detail["answer"] == "Management discussed supply risk [F1]."
     assert detail["sources"][0]["evidence_id"] == "F1"
+
+
+async def test_evaluate_report_runs_the_full_pipeline_before_scoring() -> None:
+    report = stored_report()
+    claim = ResearchClaim(
+        id=31,
+        report_id=report.id,
+        claim_index=1,
+        claim_text="Management discussed supply risk.",
+        claim_type="FACTUAL",
+        citation_ids=["F1"],
+        extraction_metadata={},
+    )
+    evaluations = [
+        ClaimEvaluation(
+            id=41,
+            claim_id=claim.id,
+            evaluation_type="CITATION",
+            status="VERIFIED",
+            confidence=1.0,
+            reason="Supported.",
+            evidence_ids=["F1"],
+            evaluated_evidence=[],
+            claimed_values=[],
+            calculated_values=[],
+            verifier_version="test",
+        ),
+        ClaimEvaluation(
+            id=42,
+            claim_id=claim.id,
+            evaluation_type="CONTRADICTION",
+            status="UNSUPPORTED",
+            confidence=1.0,
+            reason="No contradiction found.",
+            evidence_ids=[],
+            evaluated_evidence=[],
+            claimed_values=[],
+            calculated_values=[],
+            verifier_version="test",
+        ),
+    ]
+    temporal = ReportTemporalEvaluation(
+        id=51,
+        report_id=report.id,
+        status="PASSED",
+        score=100.0,
+        checked_source_count=1,
+        violations=[],
+        reason="All evidence is in scope.",
+        verifier_version="test",
+    )
+    claims_result = Mock()
+    claims_result.scalars.return_value.all.return_value = [claim]
+    evaluations_result = Mock()
+    evaluations_result.scalars.return_value.all.return_value = evaluations
+    session = AsyncMock(spec=AsyncSession)
+    session.scalar.side_effect = [report, None, temporal, None]
+    session.execute.side_effect = [claims_result, evaluations_result]
+
+    async def assign_database_values(evaluation: ReportEvaluation) -> None:
+        evaluation.id = 61
+        evaluation.created_at = datetime(2026, 8, 16, 15, 0, tzinfo=UTC)
+
+    session.refresh.side_effect = assign_database_values
+    call_order: list[str] = []
+    stages = (
+        "extract_research_claims",
+        "verify_report_numeric_claims",
+        "verify_report_citations",
+        "verify_report_contradictions",
+        "verify_report_temporal_integrity",
+    )
+    patches = [
+        patch(
+            f"app.api.research.{stage}",
+            new=AsyncMock(side_effect=lambda *args, _stage=stage, **kwargs: call_order.append(_stage)),
+        )
+        for stage in stages
+    ]
+
+    for stage_patch in patches:
+        stage_patch.start()
+    try:
+        result = await evaluate_report(report_id=report.id, db=session, force=False)
+    finally:
+        for stage_patch in reversed(patches):
+            stage_patch.stop()
+
+    assert call_order == list(stages)
+    assert result.report_id == report.id
+    assert result.overall_score == 100.0
+    assert result.temporal_integrity_score == 100.0
+
+
+async def test_evaluate_report_returns_existing_score_without_rerunning_pipeline() -> None:
+    existing = ReportEvaluation(
+        id=61,
+        report_id=12,
+        overall_score=100.0,
+        grounding_score=100.0,
+        numeric_accuracy_score=None,
+        citation_score=100.0,
+        temporal_integrity_score=100.0,
+        total_claim_count=1,
+        evaluated_claim_count=1,
+        verified_claim_count=1,
+        partially_supported_claim_count=0,
+        unsupported_claim_count=0,
+        contradiction_count=0,
+        error_count=0,
+        scoring_version="test",
+        created_at=datetime(2026, 8, 16, 15, 0, tzinfo=UTC),
+    )
+    session = AsyncMock(spec=AsyncSession)
+    session.scalar.side_effect = [stored_report(), existing]
+    extract = AsyncMock()
+
+    with patch("app.api.research.extract_research_claims", new=extract):
+        result = await evaluate_report(report_id=12, db=session, force=False)
+
+    assert result.id == existing.id
+    extract.assert_not_awaited()

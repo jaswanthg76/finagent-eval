@@ -1074,6 +1074,12 @@ async def evaluate_report(
     if existing is not None and not force:
         return _report_evaluation_read(existing)
 
+    await extract_research_claims(report_id=report_id, db=db, force=force)
+    await verify_report_numeric_claims(report_id=report_id, db=db, force=force)
+    await verify_report_citations(report_id=report_id, db=db, force=force)
+    await verify_report_contradictions(report_id=report_id, db=db, force=force)
+    await verify_report_temporal_integrity(report_id=report_id, db=db, force=force)
+
     claims_result = await db.execute(
         select(ResearchClaim)
         .where(ResearchClaim.report_id == report_id)
@@ -1129,6 +1135,9 @@ async def evaluate_report(
             if temporal_evaluation is not None and temporal_evaluation.score is not None
             else None
         ),
+    )
+    existing = await db.scalar(
+        select(ReportEvaluation).where(ReportEvaluation.report_id == report_id)
     )
     if existing is not None:
         await db.delete(existing)

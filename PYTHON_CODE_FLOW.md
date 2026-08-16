@@ -221,12 +221,15 @@ violations. A missing cutoff is `NOT_APPLICABLE`.
 
 `POST /api/research/reports/{report_id}/evaluate` enters `app.api.research.evaluate_report()`.
 
-1. Load all report claims, typed claim evaluations, and the optional temporal evaluation.
-2. Require `NUMERIC` checks for numeric-eligible claims.
-3. Require `CITATION` and `CONTRADICTION` checks for qualitative claims.
-4. Convert ORM rows into `ScoringClaim` and `ScoringEvaluation` dataclasses.
-5. Call the pure `app.evaluation.scoring.calculate_report_score()` function.
-6. Persist the resulting `ReportEvaluation` with `SCORING_VERSION`.
+1. Return an existing final evaluation immediately unless `force=true`.
+2. Extract claims and run numeric, citation, contradiction, and temporal verification in order.
+3. Reuse each stage's persisted result when `force=false`, allowing a failed pipeline to resume.
+4. Load all report claims, typed claim evaluations, and the temporal evaluation.
+5. Require `NUMERIC` checks for numeric-eligible claims and `CITATION` plus `CONTRADICTION`
+   checks for qualitative claims.
+6. Convert ORM rows into `ScoringClaim` and `ScoringEvaluation` dataclasses.
+7. Call the pure `app.evaluation.scoring.calculate_report_score()` function.
+8. Persist the resulting `ReportEvaluation` with `SCORING_VERSION`.
 
 Component calculation is:
 
