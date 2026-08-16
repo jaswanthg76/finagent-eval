@@ -1572,7 +1572,7 @@ application-defined tools:
 
 ```text
 search_filings
-get_financial_metrics
+get_financial_evidence
 ```
 
 The backend fixes the company from the research request, validates all tool arguments, rejects extra

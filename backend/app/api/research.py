@@ -25,6 +25,7 @@ from app.evaluation.contradiction import (
     GroqContradictionEvaluator,
     is_contradiction_eligible,
 )
+from app.evaluation.evidence import relevant_excerpt
 from app.evaluation.numeric import (
     NUMERIC_VERIFIER_VERSION,
     is_numeric_claim,
@@ -56,6 +57,7 @@ from app.research.claims import (
     ClaimExtractionError,
     GroqClaimExtractor,
 )
+from app.research.evidence import resolve_metric_name
 from app.schemas.research import (
     CitationVerificationResult,
     ClaimEvaluationRead,
@@ -75,6 +77,8 @@ from app.schemas.research import (
 from app.schemas.retrieval import MetricEvidence, SemanticSearchResult
 
 router = APIRouter(prefix="/research", tags=["research agent"])
+RESEARCH_FILING_EVIDENCE_CHAR_BUDGET = 12_000
+RESEARCH_FILING_EXCERPT_MAX_CHARS = 1_600
 
 
 def _stored_report_read(report: ResearchReport, ticker: str) -> ResearchReportRead:
@@ -277,100 +281,162 @@ async def generate_research_answer(
     metrics: list[MetricEvidence] = []
     chunk_evidence_ids: dict[int, str] = {}
     metric_evidence_ids: dict[int, str] = {}
-    async def execute_tool(name: str, arguments: dict[str, object]) -> dict[str, object]:
-        if name == "search_filings":
-            filed_after: date | None = None
-            accession_numbers: set[str] | None = None
-            if metrics:
-                filed_after = max(metric.filing_date for metric in metrics)
-                accession_numbers = {
-                    metric.accession_number
-                    for metric in metrics
-                    if metric.filing_date == filed_after
+    remaining_filing_evidence_chars = RESEARCH_FILING_EVIDENCE_CHAR_BUDGET
+
+    async def search_filing_evidence(query: str, limit: int) -> list[dict[str, object]]:
+        nonlocal remaining_filing_evidence_chars
+        if remaining_filing_evidence_chars < 200:
+            return []
+        filed_after: date | None = None
+        accession_numbers: set[str] | None = None
+        if metrics:
+            filed_after = max(metric.filing_date for metric in metrics)
+            accession_numbers = {
+                metric.accession_number
+                for metric in metrics
+                if metric.filing_date == filed_after
+            }
+        results = await _semantic_search_for_company(
+            company=company,
+            query=query,
+            db=db,
+            as_of_date=request.as_of_date,
+            form=request.form,
+            limit=limit,
+            filed_after=filed_after,
+            section_name=None,
+            accession_numbers=accession_numbers,
+        )
+        items: list[dict[str, object]] = []
+        for result in results:
+            if remaining_filing_evidence_chars < 200:
+                break
+            excerpt = relevant_excerpt(
+                result.content,
+                query,
+                min(RESEARCH_FILING_EXCERPT_MAX_CHARS, remaining_filing_evidence_chars),
+            )
+            if not excerpt:
+                continue
+            evidence_id = chunk_evidence_ids.get(result.chunk_id)
+            if evidence_id is None:
+                chunks.append(result)
+                evidence_id = f"F{len(chunks)}"
+                chunk_evidence_ids[result.chunk_id] = evidence_id
+            model_evidence = result.model_dump(mode="json")
+            model_evidence["content"] = excerpt
+            remaining_filing_evidence_chars -= len(excerpt)
+            items.append({"evidence_id": evidence_id, **model_evidence})
+        return items
+
+    def store_metric_evidence(
+        results: list[MetricEvidence],
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        items: list[dict[str, object]] = []
+        for result in results:
+            evidence_id = metric_evidence_ids.get(result.metric_id)
+            if evidence_id is None:
+                metrics.append(result)
+                evidence_id = f"M{len(metrics)}"
+                metric_evidence_ids[result.metric_id] = evidence_id
+            items.append(
+                {
+                    "evidence_id": evidence_id,
+                    "metric_name": result.metric_name,
+                    "value": str(result.value),
+                    "unit": result.unit,
+                    "period_start": result.period_start.isoformat()
+                    if result.period_start
+                    else None,
+                    "period_end": result.period_end.isoformat(),
+                    "filing_date": result.filing_date.isoformat(),
+                    "form": result.form,
+                    "source_url": result.source_url,
                 }
-            results = await _semantic_search_for_company(
-                company=company,
-                query=str(arguments["query"]),
-                db=db,
-                as_of_date=request.as_of_date,
-                form=request.form,
-                limit=int(arguments["limit"]),
-                filed_after=filed_after,
-                section_name=None,
-                accession_numbers=accession_numbers,
             )
-            items: list[dict[str, object]] = []
-            for result in results:
-                evidence_id = chunk_evidence_ids.get(result.chunk_id)
-                if evidence_id is None:
-                    chunks.append(result)
-                    evidence_id = f"F{len(chunks)}"
-                    chunk_evidence_ids[result.chunk_id] = evidence_id
-                model_evidence = result.model_dump(mode="json")
-                model_evidence["content"] = result.content[:3_500]
-                items.append({"evidence_id": evidence_id, **model_evidence})
-            return {"filing_evidence": items}
-        if name == "get_financial_metrics":
-            results = await _metric_evidence(
-                company=company,
-                metric_names=[str(value) for value in arguments["metric_names"]],
-                limit_per_metric=int(arguments["limit_per_metric"]),
-                as_of_date=request.as_of_date,
-                form=request.form,
-                db=db,
+
+        comparisons: list[dict[str, object]] = []
+        by_name: dict[str, list[tuple[str, MetricEvidence]]] = {}
+        for item, result in zip(items, results, strict=True):
+            by_name.setdefault(result.metric_name, []).append(
+                (str(item["evidence_id"]), result)
             )
-            items = []
-            for result in results:
-                evidence_id = metric_evidence_ids.get(result.metric_id)
-                if evidence_id is None:
-                    metrics.append(result)
-                    evidence_id = f"M{len(metrics)}"
-                    metric_evidence_ids[result.metric_id] = evidence_id
-                items.append(
+        for metric_name, facts in by_name.items():
+            if len(facts) < 2:
+                continue
+            newer_id, newer = facts[0]
+            for older_id, older in facts[1:]:
+                if newer.unit != older.unit or older.value == 0:
+                    continue
+                absolute_change = newer.value - older.value
+                percent_change = (absolute_change / older.value * Decimal(100)).quantize(
+                    Decimal("0.1")
+                )
+                comparisons.append(
                     {
-                        "evidence_id": evidence_id,
-                        "metric_name": result.metric_name,
-                        "value": str(result.value),
-                        "unit": result.unit,
-                        "period_start": result.period_start.isoformat()
-                        if result.period_start
-                        else None,
-                        "period_end": result.period_end.isoformat(),
-                        "filing_date": result.filing_date.isoformat(),
-                        "form": result.form,
-                        "source_url": result.source_url,
+                        "metric_name": metric_name,
+                        "newer_evidence_id": newer_id,
+                        "older_evidence_id": older_id,
+                        "absolute_change": str(absolute_change),
+                        "percent_change": str(percent_change),
+                        "unit": newer.unit,
                     }
                 )
-            comparisons: list[dict[str, object]] = []
-            by_name: dict[str, list[tuple[str, MetricEvidence]]] = {}
-            for item, result in zip(items, results, strict=True):
-                by_name.setdefault(result.metric_name, []).append(
-                    (str(item["evidence_id"]), result)
-                )
-            for metric_name, facts in by_name.items():
-                if len(facts) < 2:
-                    continue
-                newer_id, newer = facts[0]
-                for older_id, older in facts[1:]:
-                    if newer.unit != older.unit or older.value == 0:
-                        continue
-                    absolute_change = newer.value - older.value
-                    percent_change = (absolute_change / older.value * Decimal(100)).quantize(
-                        Decimal("0.1")
-                    )
-                    comparisons.append(
-                        {
-                            "metric_name": metric_name,
-                            "newer_evidence_id": newer_id,
-                            "older_evidence_id": older_id,
-                            "absolute_change": str(absolute_change),
-                            "percent_change": str(percent_change),
-                            "unit": newer.unit,
-                        }
-                    )
+        return items, comparisons
+
+    async def execute_tool(name: str, arguments: dict[str, object]) -> dict[str, object]:
+        if name == "search_filings":
             return {
-                "metric_evidence": items,
+                "filing_evidence": await search_filing_evidence(
+                    str(arguments["query"]), int(arguments["limit"])
+                ),
+                "evidence_budget_exhausted": remaining_filing_evidence_chars < 200,
+            }
+        if name == "get_financial_evidence":
+            requested_concepts = [str(value) for value in arguments["concepts"]]
+            metric_by_concept = {
+                concept: resolve_metric_name(concept) for concept in requested_concepts
+            }
+            structured_metrics = list(
+                dict.fromkeys(
+                    metric_name
+                    for metric_name in metric_by_concept.values()
+                    if metric_name is not None
+                )
+            )
+            results = (
+                await _metric_evidence(
+                    company=company,
+                    metric_names=structured_metrics,
+                    limit_per_metric=int(arguments["limit_per_concept"]),
+                    as_of_date=request.as_of_date,
+                    form=request.form,
+                    db=db,
+                )
+                if structured_metrics
+                else []
+            )
+            structured_evidence, comparisons = store_metric_evidence(results)
+            found_metrics = {result.metric_name for result in results}
+            filing_concepts = [
+                concept
+                for concept, metric_name in metric_by_concept.items()
+                if metric_name is None or metric_name not in found_metrics
+            ]
+            filing_evidence: list[dict[str, object]] = []
+            for concept in filing_concepts:
+                concept_items = await search_filing_evidence(
+                    concept, int(arguments["limit_per_concept"])
+                )
+                filing_evidence.extend(
+                    {"concept": concept, **item} for item in concept_items
+                )
+            return {
+                "requested_concepts": requested_concepts,
+                "structured_evidence": structured_evidence,
+                "filing_evidence": filing_evidence,
                 "deterministic_comparisons": comparisons,
+                "evidence_budget_exhausted": remaining_filing_evidence_chars < 200,
             }
         raise ValueError(f"Unknown research tool: {name}")
     try:
@@ -624,7 +690,11 @@ async def verify_report_numeric_claims(
         )
     )
     existing = list(existing_result.scalars().all())
-    if len(existing) == len(eligible) and not force:
+    if (
+        len(existing) == len(eligible)
+        and all(item.verifier_version == NUMERIC_VERIFIER_VERSION for item in existing)
+        and not force
+    ):
         ordered = sorted(existing, key=lambda evaluation: eligible_ids.index(evaluation.claim_id))
         return NumericVerificationResult(
             report_id=report_id,
@@ -635,6 +705,9 @@ async def verify_report_numeric_claims(
 
     metrics_by_evidence_id = {
         f"M{index}": metric for index, metric in enumerate(report.metrics, start=1)
+    }
+    filings_by_evidence_id = {
+        f"F{index}": chunk for index, chunk in enumerate(report.chunks, start=1)
     }
     if existing:
         await db.execute(
@@ -650,6 +723,7 @@ async def verify_report_numeric_claims(
             claim_text=claim.claim_text,
             citation_ids=claim.citation_ids,
             metrics_by_evidence_id=metrics_by_evidence_id,
+            filings_by_evidence_id=filings_by_evidence_id,
         )
         evaluations.append(
             ClaimEvaluation(
@@ -659,7 +733,10 @@ async def verify_report_numeric_claims(
                 confidence=outcome.confidence,
                 reason=outcome.reason,
                 evidence_ids=[
-                    evidence_id for evidence_id in claim.citation_ids if evidence_id.startswith("M")
+                    evidence_id
+                    for evidence_id in claim.citation_ids
+                    if evidence_id in metrics_by_evidence_id
+                    or evidence_id in filings_by_evidence_id
                 ],
                 evaluated_evidence=[],
                 claimed_values=outcome.claimed_values,

@@ -33,16 +33,23 @@ def test_research_tool_arguments_are_strictly_validated() -> None:
     }
     with pytest.raises(ValidationError):
         validate_tool_arguments("search_filings", {"query": "risk", "ticker": "AMD"})
+    assert validate_tool_arguments(
+        "get_financial_evidence",
+        {"concepts": ["Data Center revenue", "accounts receivable"]},
+    ) == {
+        "concepts": ["Data Center revenue", "accounts receivable"],
+        "limit_per_concept": 3,
+    }
     with pytest.raises(ValidationError):
-        validate_tool_arguments("get_financial_metrics", {"metric_names": ["Made Up Metric"]})
+        validate_tool_arguments("get_financial_evidence", {"concepts": ["  "]})
 
 
 async def test_groq_agent_executes_validated_tool_then_returns_answer() -> None:
     tool_call = SimpleNamespace(
         id="call_1",
         function=SimpleNamespace(
-            name="get_financial_metrics",
-            arguments=json.dumps({"metric_names": ["Revenue"], "limit_per_metric": 2}),
+            name="get_financial_evidence",
+            arguments=json.dumps({"concepts": ["Revenue"], "limit_per_concept": 2}),
         ),
     )
     create = AsyncMock(
@@ -53,7 +60,7 @@ async def test_groq_agent_executes_validated_tool_then_returns_answer() -> None:
     )
     client = Mock()
     client.chat.completions.create = create
-    execute_tool = AsyncMock(return_value={"metric_evidence": [{"evidence_id": "M1"}]})
+    execute_tool = AsyncMock(return_value={"structured_evidence": [{"evidence_id": "M1"}]})
 
     answer, calls = await GroqResearchAgent(client=client).answer(
         ticker="NVDA",
@@ -66,13 +73,13 @@ async def test_groq_agent_executes_validated_tool_then_returns_answer() -> None:
     assert answer == "Revenue increased [M1]."
     assert calls == [
         {
-            "name": "get_financial_metrics",
-            "arguments": {"metric_names": ["Revenue"], "limit_per_metric": 2},
+            "name": "get_financial_evidence",
+            "arguments": {"concepts": ["Revenue"], "limit_per_concept": 2},
         }
     ]
     execute_tool.assert_awaited_once_with(
-        "get_financial_metrics",
-        {"metric_names": ["Revenue"], "limit_per_metric": 2},
+        "get_financial_evidence",
+        {"concepts": ["Revenue"], "limit_per_concept": 2},
     )
     assert create.await_args_list[0].kwargs["tool_choice"] == "required"
     assert create.await_args_list[1].kwargs["tool_choice"] == "auto"
@@ -82,8 +89,8 @@ async def test_groq_agent_keeps_both_tools_available_after_first_call() -> None:
     metric_call = SimpleNamespace(
         id="call_1",
         function=SimpleNamespace(
-            name="get_financial_metrics",
-            arguments=json.dumps({"metric_names": ["Revenue"], "limit_per_metric": 2}),
+            name="get_financial_evidence",
+            arguments=json.dumps({"concepts": ["Revenue"], "limit_per_concept": 2}),
         ),
     )
     filing_call = SimpleNamespace(
@@ -104,7 +111,7 @@ async def test_groq_agent_keeps_both_tools_available_after_first_call() -> None:
     client.chat.completions.create = create
     execute_tool = AsyncMock(
         side_effect=[
-            {"metric_evidence": [{"evidence_id": "M1"}]},
+            {"structured_evidence": [{"evidence_id": "M1"}]},
             {"filing_evidence": [{"evidence_id": "F1"}]},
         ]
     )
@@ -119,12 +126,12 @@ async def test_groq_agent_keeps_both_tools_available_after_first_call() -> None:
 
     assert answer == "Revenue changed because of demand [M1][F1]."
     assert [call["name"] for call in calls] == [
-        "get_financial_metrics",
+        "get_financial_evidence",
         "search_filings",
     ]
     for request in create.await_args_list[:2]:
         assert {tool["function"]["name"] for tool in request.kwargs["tools"]} == {
-            "get_financial_metrics",
+            "get_financial_evidence",
             "search_filings",
         }
     assert create.await_args_list[0].kwargs["tool_choice"] == "required"

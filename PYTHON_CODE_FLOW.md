@@ -104,9 +104,11 @@ eligible filing; after metrics have been retrieved, narrative search is pinned t
 contains the newest metric facts. Returned chunks receive stable report-local IDs `F1`, `F2`, and so
 on.
 
-`execute_tool("get_financial_metrics", ...)` calls `_metric_evidence()`. Returned facts receive
-report-local IDs `M1`, `M2`, and so on. Python calculates absolute and percentage comparisons for
-compatible periods; the model receives those calculations instead of doing arithmetic itself.
+`execute_tool("get_financial_evidence", ...)` resolves natural-language financial concepts. Known
+canonical concepts call `_metric_evidence()` and receive report-local IDs `M1`, `M2`, and so on.
+Company-specific concepts—and canonical concepts without stored XBRL facts—fall back to filing
+search and receive `F#` IDs. Python calculates absolute and percentage comparisons for compatible
+structured periods; the model receives those calculations instead of doing arithmetic itself.
 
 ### Model loop
 

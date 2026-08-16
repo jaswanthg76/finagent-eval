@@ -7,7 +7,6 @@ from openai import APIConnectionError, APIStatusError, AsyncOpenAI, RateLimitErr
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.core.config import settings
-from app.research.metrics import ALLOWED_METRICS
 
 ToolExecutor = Callable[[str, dict[str, object]], Awaitable[dict[str, object]]]
 
@@ -27,19 +26,21 @@ class FilingSearchArguments(BaseModel):
     limit: int = Field(default=4, ge=1, le=4)
 
 
-class MetricLookupArguments(BaseModel):
+class FinancialEvidenceArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    metric_names: list[str] = Field(min_length=1, max_length=6)
-    limit_per_metric: int = Field(default=3, ge=1, le=4)
+    concepts: list[str] = Field(min_length=1, max_length=6)
+    limit_per_concept: int = Field(default=3, ge=1, le=4)
 
-    @field_validator("metric_names")
+    @field_validator("concepts")
     @classmethod
-    def known_metric_names(cls, value: list[str]) -> list[str]:
-        unknown = sorted(set(value) - set(ALLOWED_METRICS))
-        if unknown:
-            raise ValueError(f"Unknown metric names: {', '.join(unknown)}")
-        return list(dict.fromkeys(value))
+    def normalized_concepts(cls, value: list[str]) -> list[str]:
+        concepts = [concept.strip() for concept in value]
+        if any(not concept for concept in concepts):
+            raise ValueError("Financial concepts cannot be empty")
+        if any(len(concept) > 200 for concept in concepts):
+            raise ValueError("Financial concepts cannot exceed 200 characters")
+        return list(dict.fromkeys(concepts))
 
 
 TOOL_SCHEMAS: list[dict[str, object]] = [
@@ -57,22 +58,27 @@ TOOL_SCHEMAS: list[dict[str, object]] = [
     {
         "type": "function",
         "function": {
-            "name": "get_financial_metrics",
+            "name": "get_financial_evidence",
             "description": (
-                "Retrieve exact normalized SEC XBRL facts for the selected company. Use this for "
-                "amounts, periods, trends, and comparisons."
+                "Retrieve evidence for financial concepts using natural financial terminology. "
+                "The application selects normalized XBRL facts or SEC filing content. Use this for "
+                "amounts, balances, operating metrics, segment or product revenue, trends, and "
+                "period comparisons."
             ),
             "parameters": {
-                **MetricLookupArguments.model_json_schema(),
+                **FinancialEvidenceArguments.model_json_schema(),
                 "properties": {
-                    "metric_names": {
+                    "concepts": {
                         "type": "array",
                         "minItems": 1,
                         "maxItems": 6,
-                        "items": {"type": "string", "enum": list(ALLOWED_METRICS)},
-                        "description": "Canonical normalized metric names to retrieve.",
+                        "items": {"type": "string", "minLength": 1, "maxLength": 200},
+                        "description": (
+                            "Financial concepts needed to answer the question, such as revenue, "
+                            "accounts receivable, operating cash flow, or Data Center revenue."
+                        ),
                     },
-                    "limit_per_metric": {
+                    "limit_per_concept": {
                         "type": "integer",
                         "minimum": 1,
                         "maximum": 4,
@@ -88,8 +94,8 @@ TOOL_SCHEMAS: list[dict[str, object]] = [
 def validate_tool_arguments(name: str, arguments: dict[str, object]) -> dict[str, object]:
     if name == "search_filings":
         return FilingSearchArguments.model_validate(arguments).model_dump()
-    if name == "get_financial_metrics":
-        return MetricLookupArguments.model_validate(arguments).model_dump()
+    if name == "get_financial_evidence":
+        return FinancialEvidenceArguments.model_validate(arguments).model_dump()
     raise ValueError(f"Unknown research tool: {name}")
 
 
@@ -106,23 +112,32 @@ def _system_prompt(
     return f"""You are a careful SEC financial research agent.
 Scope: {', '.join(scope)}. The application enforces this scope; never ask tools for another company.
 
-Determine what evidence is necessary to answer the question. Use get_financial_metrics when exact
-financial values, period comparisons, growth rates, margins, balances, or other structured financial
-facts are needed. Use search_filings when management explanations, drivers, risks, strategy, causes,
-outlook, or other narrative evidence are needed. A question may require multiple tools and multiple
-calls. Do not infer a financial value from narrative text when structured metric evidence is
-available. Do not perform arithmetic yourself when deterministic_comparisons are returned by a tool.
+Determine what evidence is necessary to answer the question. Use get_financial_evidence for financial
+concepts, amounts, balances, operating metrics, segment or product revenue, period comparisons,
+growth rates, and other quantitative information. Request concepts using normal financial
+terminology; you do not need to know the application's internal XBRL mappings. The application
+determines whether evidence comes from normalized XBRL facts or SEC filing content. Use
+search_filings directly for narrative evidence such as management explanations, risks, causes,
+strategy, outlook, customer relationships, or qualitative disclosures. A question may require
+multiple calls to both tools. Do not infer a financial value from narrative text when structured
+metric evidence is available. Do not perform arithmetic yourself when deterministic_comparisons are
+returned by a tool.
 When explaining a metric comparison, use narrative evidence from the filing that contains the newest
 metric evidence and verify that the narrative discusses the same period before calling it a driver.
+Tool results use a shared filing-evidence budget. Make targeted requests, and if a result says the
+budget is exhausted, answer from the returned evidence or state that the evidence is insufficient.
 
 You must use at least one provided tool before answering. Base every factual claim only on returned
 evidence. Cite filing evidence as [F1], [F2] and metric evidence as [M1], [M2], using the exact IDs in
 tool results. Cite multiple items separately as [M1][M2], never as [M1, M2]. Never invent a value,
 period, source, or citation. If evidence is insufficient, say so plainly. Describe metric periods by
 their exact start/end dates and do not infer fiscal-year labels. Treat a movement as a driver only
-when narrative evidence explicitly says it drove or caused the movement. Keep the final answer
-concise and decision-useful. Do not include a separate sources section because the application
-renders sources independently.
+when narrative evidence explicitly says it drove or caused the movement. Cite every factual
+conclusion, including overall risk conclusions. Attribute a risk or view to management only when the
+cited passage explicitly makes that statement; otherwise describe only what the passage says. Keep
+For every number taken from filing evidence, cite the exact passage containing that number, not a
+different passage about the same topic. Keep the final answer concise and decision-useful. Do not
+include a separate sources section because the application renders sources independently.
 """
 
 

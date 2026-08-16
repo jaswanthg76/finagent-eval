@@ -1,28 +1,9 @@
 import re
 
+from app.research.evidence import METRIC_ALIASES
 from app.research.metrics import ALLOWED_METRICS
 
-_METRIC_ALIASES: dict[str, tuple[str, ...]] = {
-    "Revenue": ("revenue", "sales", "top line"),
-    "Gross Profit": ("gross profit",),
-    "Operating Income": ("operating income", "operating profit"),
-    "Net Income": ("net income", "net earnings", "bottom line", "profit"),
-    "Diluted EPS": ("diluted eps", "eps", "earnings per share"),
-    "Cash and Cash Equivalents": ("cash balance", "cash position", "cash equivalents"),
-    "Operating Cash Flow": ("operating cash flow", "cash from operations"),
-    "Capital Expenditures": ("capital expenditures", "capital expenditure", "capex"),
-    "Research and Development Expense": (
-        "research and development",
-        "r d expense",
-        "r d spending",
-        "r&d",
-    ),
-    "Assets": ("assets", "total assets"),
-    "Liabilities": ("liabilities", "total liabilities"),
-    "Stockholders' Equity": ("stockholders equity", "shareholders equity", "book value"),
-}
-
-METRIC_TERMS = tuple((metric_name, _METRIC_ALIASES[metric_name]) for metric_name in ALLOWED_METRICS)
+METRIC_TERMS = tuple((metric_name, METRIC_ALIASES[metric_name]) for metric_name in ALLOWED_METRICS)
 
 
 def _normalize(text: str) -> str:

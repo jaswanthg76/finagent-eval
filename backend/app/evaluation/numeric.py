@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
-NUMERIC_VERIFIER_VERSION = "numeric-v1"
+NUMERIC_VERIFIER_VERSION = "numeric-v2"
 VerificationStatus = Literal[
     "VERIFIED",
     "PARTIALLY_SUPPORTED",
@@ -32,6 +32,11 @@ SCALE_FACTORS = {
     "k": Decimal(1000),
     "thousand": Decimal(1000),
 }
+DIRECTION_RE = re.compile(
+    r"\b(?:(?P<decrease>decreased?|declined?|fell|fallen|dropped?|down|reduced?|reduction)"
+    r"|(?P<increase>increased?|grew|grown|rose|up))\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -55,6 +60,9 @@ def extract_claimed_values(text: str) -> list[dict[str, Any]]:
             value = _decimal(match.group(1))
         except InvalidOperation:
             continue
+        direction_matches = list(DIRECTION_RE.finditer(text[max(0, match.start() - 80) : match.start()]))
+        if value > 0 and direction_matches and direction_matches[-1].group("decrease"):
+            value = -value
         values.append({"kind": "percent", "value": str(value), "text": match.group(0)})
         occupied.append(match.span())
 
@@ -134,6 +142,21 @@ def _calculated_values(metrics: list[tuple[str, dict[str, Any]]]) -> list[dict[s
     return calculated
 
 
+def _filing_values(filings: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
+    calculated: list[dict[str, Any]] = []
+    for evidence_id, filing in filings:
+        for value in extract_claimed_values(str(filing.get("content", ""))):
+            calculated.append(
+                {
+                    "kind": value["kind"],
+                    "value": value["value"],
+                    "evidence_ids": [evidence_id],
+                    "label": "value stated in cited filing passage",
+                }
+            )
+    return calculated
+
+
 def _matches(claimed: dict[str, Any], calculated: dict[str, Any]) -> bool:
     if claimed["kind"] != calculated["kind"]:
         return False
@@ -150,12 +173,19 @@ def verify_numeric_claim(
     claim_text: str,
     citation_ids: list[str],
     metrics_by_evidence_id: dict[str, dict[str, Any]],
+    filings_by_evidence_id: dict[str, dict[str, Any]] | None = None,
 ) -> NumericVerificationOutcome:
     claimed = extract_claimed_values(claim_text)
     cited_metrics = [
         (evidence_id, metrics_by_evidence_id[evidence_id])
         for evidence_id in citation_ids
         if evidence_id in metrics_by_evidence_id
+    ]
+    available_filings = filings_by_evidence_id or {}
+    cited_filings = [
+        (evidence_id, available_filings[evidence_id])
+        for evidence_id in citation_ids
+        if evidence_id in available_filings
     ]
     if not claimed:
         return NumericVerificationOutcome(
@@ -165,16 +195,16 @@ def verify_numeric_claim(
             claimed_values=[],
             calculated_values=[],
         )
-    if not cited_metrics:
+    if not cited_metrics and not cited_filings:
         return NumericVerificationOutcome(
             status="UNSUPPORTED",
             confidence=1.0,
-            reason="The numeric claim does not cite any structured metric evidence.",
+            reason="The numeric claim does not cite any stored metric or filing evidence.",
             claimed_values=claimed,
             calculated_values=[],
         )
 
-    calculated = _calculated_values(cited_metrics)
+    calculated = _calculated_values(cited_metrics) + _filing_values(cited_filings)
     matched = [any(_matches(value, candidate) for candidate in calculated) for value in claimed]
     matched_count = sum(matched)
     if matched_count == len(claimed):

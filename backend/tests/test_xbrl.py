@@ -101,6 +101,36 @@ def test_parse_company_facts_preserves_instant_facts_and_amendments() -> None:
     assert facts[0].form == "10-K/A"
 
 
+def test_parse_company_facts_normalizes_accounts_receivable_aliases() -> None:
+    payload = {
+        "facts": {
+            "us-gaap": {
+                "AccountsReceivableNetCurrent": {
+                    "units": {
+                        "USD": [
+                            {
+                                "end": "2026-04-26",
+                                "val": 23_065_000_000,
+                                "accn": "0001045810-26-000052",
+                                "fy": 2027,
+                                "fp": "Q1",
+                                "form": "10-Q",
+                                "filed": "2026-05-20",
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+    facts = parse_company_facts(payload)
+
+    assert len(facts) == 1
+    assert facts[0].metric_name == "Accounts Receivable"
+    assert facts[0].period_start is None
+
+
 def test_parse_company_facts_keeps_distinct_quarter_and_year_to_date_facts() -> None:
     common = {
         "end": "2026-06-30",

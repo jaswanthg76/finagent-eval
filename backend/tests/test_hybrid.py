@@ -25,6 +25,9 @@ def test_identify_metric_names_from_financial_language() -> None:
         "Stockholders' Equity",
     ]
     assert identify_metric_names("What risks did management discuss?") == []
+    assert identify_metric_names("How quickly are receivables growing?") == [
+        "Accounts Receivable"
+    ]
 
 
 def test_hybrid_research_returns_deduplicated_metric_evidence() -> None:

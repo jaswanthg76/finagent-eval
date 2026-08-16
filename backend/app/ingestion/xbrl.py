@@ -8,6 +8,8 @@ SUPPORTED_FACT_FORMS = frozenset({"10-K", "10-K/A", "10-Q", "10-Q/A", "8-K", "8-
 # Different issuers and filing generations may use different US-GAAP concepts
 # for the same normalized metric. Preserve xbrl_tag so the mapping remains auditable.
 METRIC_NAME_BY_TAG = {
+    "AccountsReceivableNetCurrent": "Accounts Receivable",
+    "AccountsReceivableNet": "Accounts Receivable",
     "Assets": "Assets",
     "CashAndCashEquivalentsAtCarryingValue": "Cash and Cash Equivalents",
     "EarningsPerShareDiluted": "Diluted EPS",
@@ -108,4 +110,3 @@ def parse_company_facts(payload: dict[str, Any]) -> list[NormalizedFinancialFact
                     normalized[normalized_fact.identity] = normalized_fact
 
     return list(normalized.values())
-

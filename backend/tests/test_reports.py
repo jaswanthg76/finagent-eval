@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.research import evaluate_report
+from app.api.research import RESEARCH_FILING_EVIDENCE_CHAR_BUDGET, evaluate_report
 from app.core.database import get_db
 from app.main import app
 from app.models.claim_evaluation import ClaimEvaluation
@@ -15,7 +15,7 @@ from app.models.report_evaluation import ReportEvaluation
 from app.models.report_temporal_evaluation import ReportTemporalEvaluation
 from app.models.research_claim import ResearchClaim
 from app.models.research_report import ResearchReport
-from app.schemas.retrieval import MetricEvidence
+from app.schemas.retrieval import MetricEvidence, SemanticSearchResult
 
 
 def stored_report() -> ResearchReport:
@@ -89,7 +89,7 @@ def test_generate_research_answer_persists_report_snapshot() -> None:
     session.refresh.assert_awaited_once_with(persisted)
 
 
-def test_research_aligns_filing_search_with_latest_metric_filing() -> None:
+def test_research_routes_mixed_financial_concepts_and_aligns_filing_search() -> None:
     company = Company(
         id=5,
         ticker="NVDA",
@@ -123,14 +123,51 @@ def test_research_aligns_filing_search_with_latest_metric_filing() -> None:
         source_url="https://www.sec.gov/latest.htm",
     )
 
+    filing_result = SemanticSearchResult(
+        chunk_id=100,
+        filing_id=4,
+        accession_number="0001045810-26-000052",
+        form="10-Q",
+        filing_date=date(2026, 5, 20),
+        report_date=date(2026, 4, 26),
+        section_name="Management's Discussion and Analysis",
+        chunk_index=3,
+        content=(
+            "Boilerplate disclosure. " * 400
+            + "Data Center revenue, customer concentration, Gaming revenue, Blackwell systems "
+            "revenue, hyperscale customer exposure, and revenue drivers."
+        ),
+        token_count=1_000,
+        similarity=0.9,
+        source_url="https://www.sec.gov/latest.htm",
+        embedded_at=datetime(2026, 8, 15, tzinfo=UTC),
+    )
+    tool_results: list[dict[str, object]] = []
+
     async def answer(**kwargs: object) -> tuple[str, list[dict[str, object]]]:
         execute_tool = kwargs["execute_tool"]
-        await execute_tool("search_filings", {"query": "revenue drivers", "limit": 2})
-        await execute_tool(
-            "get_financial_metrics",
-            {"metric_names": ["Revenue"], "limit_per_metric": 2},
+        tool_results.append(
+            await execute_tool("search_filings", {"query": "revenue drivers", "limit": 2})
         )
-        await execute_tool("search_filings", {"query": "revenue drivers", "limit": 2})
+        tool_results.append(
+            await execute_tool(
+                "get_financial_evidence",
+                {
+                    "concepts": [
+                        "Revenue",
+                        "Data Center revenue",
+                        "customer concentration",
+                        "Gaming revenue",
+                        "Blackwell systems revenue",
+                        "hyperscale customer exposure",
+                    ],
+                    "limit_per_concept": 2,
+                },
+            )
+        )
+        tool_results.append(
+            await execute_tool("search_filings", {"query": "revenue drivers", "limit": 2})
+        )
         return "Revenue increased [M1].", []
 
     fake_agent = Mock()
@@ -140,7 +177,7 @@ def test_research_aligns_filing_search_with_latest_metric_filing() -> None:
         yield session
 
     app.dependency_overrides[get_db] = override_get_db
-    semantic_search = AsyncMock(return_value=[])
+    semantic_search = AsyncMock(return_value=[filing_result])
     try:
         with (
             patch("app.api.research.GroqResearchAgent", return_value=fake_agent),
@@ -159,13 +196,31 @@ def test_research_aligns_filing_search_with_latest_metric_filing() -> None:
         app.dependency_overrides.clear()
 
     assert response.status_code == 200
-    first_search, aligned_search = semantic_search.await_args_list
+    first_search = semantic_search.await_args_list[0]
+    concept_search = semantic_search.await_args_list[1]
+    aligned_search = semantic_search.await_args_list[-1]
     assert first_search.kwargs["filed_after"] is None
     assert first_search.kwargs["accession_numbers"] is None
+    assert concept_search.kwargs["query"] == "Data Center revenue"
+    assert concept_search.kwargs["accession_numbers"] == {
+        "0001045810-26-000052"
+    }
     assert aligned_search.kwargs["filed_after"] == date(2026, 5, 20)
     assert aligned_search.kwargs["accession_numbers"] == {
         "0001045810-26-000052"
     }
+    financial_result = tool_results[1]
+    assert financial_result["requested_concepts"][:2] == ["Revenue", "Data Center revenue"]
+    assert financial_result["structured_evidence"][0]["metric_name"] == "Revenue"
+    returned_filing_items = [
+        item
+        for result in tool_results
+        for item in result.get("filing_evidence", [])
+    ]
+    assert sum(len(item["content"]) for item in returned_filing_items) <= (
+        RESEARCH_FILING_EVIDENCE_CHAR_BUDGET
+    )
+    assert all(len(item["content"]) <= 1_600 for item in returned_filing_items)
 
 
 def test_list_and_get_saved_research_reports() -> None:

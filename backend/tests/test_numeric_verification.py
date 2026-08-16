@@ -50,6 +50,46 @@ def test_numeric_verifier_requires_metric_citations() -> None:
         claim_text="Revenue increased 85%.",
         citation_ids=["F1"],
         metrics_by_evidence_id=METRICS,
+        filings_by_evidence_id={},
     )
 
     assert outcome.status == "UNSUPPORTED"
+
+
+def test_numeric_verifier_accepts_values_stated_in_filing_evidence() -> None:
+    outcome = verify_numeric_claim(
+        claim_text="One customer represented 16% of total revenue.",
+        citation_ids=["F1"],
+        metrics_by_evidence_id=METRICS,
+        filings_by_evidence_id={
+            "F1": {"content": "Customer A represented 16% of total revenue."}
+        },
+    )
+
+    assert outcome.status == "VERIFIED"
+    assert outcome.calculated_values[0]["evidence_ids"] == ["F1"]
+
+
+def test_numeric_verifier_interprets_decrease_language_as_negative_change() -> None:
+    receivables = {
+        "M1": {
+            "metric_name": "Accounts Receivable",
+            "value": "22132000000",
+            "unit": "USD",
+            "period_end": "2025-04-27",
+        },
+        "M2": {
+            "metric_name": "Accounts Receivable",
+            "value": "23065000000",
+            "unit": "USD",
+            "period_end": "2025-01-26",
+        },
+    }
+    outcome = verify_numeric_claim(
+        claim_text="Accounts receivable decreased by 4.0% compared with the previous quarter.",
+        citation_ids=["M1", "M2"],
+        metrics_by_evidence_id=receivables,
+    )
+
+    assert extract_claimed_values("Accounts receivable decreased by 4.0%.")[0]["value"] == "-4.0"
+    assert outcome.status == "VERIFIED"

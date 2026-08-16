@@ -8,6 +8,7 @@ ALLOWED_METRICS = (
     "Operating Cash Flow",
     "Capital Expenditures",
     "Research and Development Expense",
+    "Accounts Receivable",
     "Assets",
     "Liabilities",
     "Stockholders' Equity",
